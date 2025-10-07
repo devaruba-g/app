@@ -18,9 +18,7 @@ let form = await request.formData();
 let name = form.get('name') as string;
 let email = form.get('email') as string;
 let password = form.get('password') as string;
- if (!email.endsWith('@gmail.com')) {
-      return fail(400, { type: 'error', message: 'Only Gmail addresses allowed' });
-    }
+
 if (password.length < 8)
 	return fail(400, { type: 'error', message: 'password must be greater than 7 characters' });
 try {
@@ -50,10 +48,13 @@ try {
 		'SELECT * FROM auth_user WHERE email = ?',
 		[email]
 	);
+if (!rows || rows.length === 0) {
+    return fail(400, { type: 'error', message: 'invalid email or password!' });
+}
 let user = rows[0];
 let val = await bcrypt.compare(password, user.password);
-if (!user && !val) {
-	return fail(400, { type: 'error', message: 'invalid email or password!' });
+if (!val) {
+    return fail(400, { type: 'error', message: 'invalid email or password!' });
 }
 let ses = await auth.createSession(user.id, {});
 let sesco = auth.createSessionCookie(ses.id);

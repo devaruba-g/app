@@ -6,7 +6,18 @@ export const handle: Handle = async ({ event, resolve }) => {
     event.locals.user = null;
     event.locals.session = null;
     return resolve(event);}
-  const { session, user } = await auth.validateSession(sessionId);
+  let session = null;
+  let user = null;
+  try {
+    ({ session, user } = await auth.validateSession(sessionId));
+  } catch (e) {
+ 
+    const blank = auth.createBlankSessionCookie();
+    event.cookies.set(blank.name, blank.value, { path: '.', ...blank.attributes });
+    event.locals.user = null;
+    event.locals.session = null;
+    return resolve(event);
+  }
   if (session && session.fresh) {
     const sessionCookie = auth.createSessionCookie(session.id);
     event.cookies.set(sessionCookie.name, sessionCookie.value, {

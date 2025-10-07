@@ -59,9 +59,11 @@
 	"dependencies": {
 		"@lucia-auth/adapter-mysql": "^3.0.2",
 		"@node-rs/argon2": "^2.0.2",
+		"@sveltejs/adapter-vercel": "^5.10.3",
 		"bcrypt": "^6.0.0",
 		"bcryptjs": "^3.0.2",
-		"lucia-auth": "^1.8.0",
+		"dotenv": "^17.2.3",
+		"lucia": "^3.2.0",
 		"mysql2": "^3.15.1",
 		"tailwind-scrollbar": "^4.0.2"
 	}
