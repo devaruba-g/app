@@ -38,7 +38,10 @@
 		"@sveltejs/package": "^2.0.0",
 		"@sveltejs/vite-plugin-svelte": "^6.0.0",
 		"@tailwindcss/vite": "^4.0.0",
+		"@types/bcrypt": "^6.0.0",
 		"@types/node": "^24.5.2",
+		"@types/nodemailer": "^7.0.2",
+		"@types/uuid": "^10.0.0",
 		"bits-ui": "^2.11.4",
 		"clsx": "^2.1.1",
 		"mode-watcher": "^1.1.0",
@@ -62,9 +65,13 @@
 		"@sveltejs/adapter-vercel": "^5.10.3",
 		"bcrypt": "^6.0.0",
 		"bcryptjs": "^3.0.2",
+		"dayjs": "^1.11.18",
 		"dotenv": "^17.2.3",
 		"lucia": "^3.2.0",
 		"mysql2": "^3.15.1",
-		"tailwind-scrollbar": "^4.0.2"
+		"nodemailer": "^7.0.7",
+		"resend": "^6.1.2",
+		"tailwind-scrollbar": "^4.0.2",
+		"uuid": "^13.0.0"
 	}
 }
