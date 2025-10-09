@@ -15,16 +15,37 @@ interface ChatMessage extends RowDataPacket {
   receiver_id: string;
   content: string;
   created_at: Date;
+  seen: boolean;
 }
 
 export let load: PageServerLoad = async ({ locals, url }) => {
   if (!locals.user)
     throw redirect(302, '/');
-  let [rows] = await db.execute<users[]>('SELECT id, name FROM auth_user WHERE id != ?', [locals.user.id]);
-  let users = rows.map(u => ({
+
+
+  let [allUsersRows] = await db.execute<users[]>('SELECT id, name FROM auth_user WHERE id != ?', [locals.user.id]);
+  let allUsers = allUsersRows.map(u => ({
     ...u,
     avatar: `https://joeschmoe.io/api/v1/${u.id}`
   }));
+
+
+  let [chatUsersRows] = await db.execute<users[]>(`
+    SELECT DISTINCT u.id, u.name 
+    FROM auth_user u 
+    WHERE u.id != ? 
+    AND u.id IN (
+      SELECT DISTINCT sender_id FROM chat WHERE receiver_id = ?
+      UNION
+      SELECT DISTINCT receiver_id FROM chat WHERE sender_id = ?
+    )
+  `, [locals.user.id, locals.user.id, locals.user.id]);
+
+  let chatUsers = chatUsersRows.map(u => ({
+    ...u,
+    avatar: `https://joeschmoe.io/api/v1/${u.id}`
+  }));
+
   const selectedUserId = url.searchParams.get('user');
   let messages: ChatMessage[] = [];
   if (selectedUserId) {
@@ -38,8 +59,14 @@ export let load: PageServerLoad = async ({ locals, url }) => {
       console.error('Error loading messages:', error);
     }
   }
+
   return {
-    user: locals.user, users, messages, selectedUserId
+    user: locals.user,
+    users: chatUsers,
+    allUsers,
+    chatUsers,
+    messages,
+    selectedUserId
   };
 };
 
@@ -52,10 +79,12 @@ export let actions: Actions = {
       let sender_id = locals.user?.id;
       if (!sender_id) return { success: false, message: 'You must be logged in' };
       if (!receiver_id || !content) return { success: false, message: 'Missing data' };
+
       const [result] = await db.execute<ResultSetHeader>(
-        'INSERT INTO chat (sender_id, receiver_id, content) VALUES (?, ?, ?)',
+        'INSERT INTO chat (sender_id, receiver_id, content, seen) VALUES (?, ?, ?, FALSE)',
         [sender_id, receiver_id, content]
       );
+
       const insertedId = (result as ResultSetHeader).insertId;
       publish({
         type: 'message',

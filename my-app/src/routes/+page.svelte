@@ -39,7 +39,7 @@
       Connect and chat with friends and colleagues
     </p>
   </header>
-  
+
   <div class="flex-1 flex items-center justify-center p-4">
     <Card class="w-full max-w-md bg-white shadow-lg rounded-lg">
       <CardHeader class="bg-[#0073b1] text-white p-6 rounded-t-lg">
@@ -92,12 +92,13 @@
               >
                 Forgot Password?
               </a>
-              {#if form?.type === "error" && form.message}
-                <div class="text-red-600 text-sm">{form.message}</div>
+              {#if form?.type === "signin-success"}
+                <p class="text-green-600">{form.message}</p>
               {/if}
-              {#if form?.type === "success" && form.message}
-                <div class="text-green-600 text-sm">{form.message}</div>
+              {#if form?.type === "error"}
+                <p class="text-red-600">{form.message}</p>
               {/if}
+
               <Button
                 type="submit"
                 class="mt-2 bg-[#0073b1] hover:bg-blue-700 text-white"
@@ -135,16 +136,13 @@
                 required
                 class="border-gray-300 focus:ring-[#0073b1] focus:border-[#0073b1]"
               />
-              {#if form?.type === "error" && form.message}
-                <div class="text-red-600 rounded-md text-sm">
-                  {form.message}
-                </div>
+              {#if form?.type === "signup-success"}
+                <p class="text-green-600">{form.message}</p>
               {/if}
-              {#if form?.type === "success" && form.message}
-                <div class="text-green-600 rounded-md text-sm">
-                  {form.message}
-                </div>
+              {#if form?.type === "error"}
+                <p class="text-red-600">{form.message}</p>
               {/if}
+
               <Button
                 type="submit"
                 class="mt-2 bg-[#0073b1] hover:bg-blue-700 text-white"

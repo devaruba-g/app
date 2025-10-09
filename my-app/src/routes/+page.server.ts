@@ -33,7 +33,7 @@ export let actions: Actions = {
 
 		if (password.length < 8)
 			return fail(400, { type: 'error', message: 'password must be greater than 7 characters' });
-		
+
 		try {
 			let [alr] = await db.execute<users[]>(
 				'SELECT id FROM auth_user WHERE email = ?',
@@ -47,7 +47,7 @@ export let actions: Actions = {
 				'INSERT INTO auth_user (id, name, email, password) VALUES (?, ?, ?, ?)',
 				[id, name, email, pass]
 			);
-			return { type: 'success', message: 'signup successful' };
+			return { type: 'signup-success', message: 'Signup successful' };
 		} catch (error) {
 			return fail(500, { type: 'error', message: 'error occurred' });
 		}
@@ -76,7 +76,7 @@ export let actions: Actions = {
 				path: '.',
 				...sesco.attributes
 			});
-			return { type: 'success', message: 'Sign in successful', redirect: 'signin' };
+			return { type: 'signin-success', message: 'Sign in successful', redirect: 'signin' };
 		} catch (error) {
 			console.error('Signin error:', error);
 			return fail(500, { type: 'error', message: 'error occurred' });

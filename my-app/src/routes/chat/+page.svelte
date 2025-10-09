@@ -7,42 +7,78 @@
   import { Button } from "$lib/components/ui/button";
   import { Card, CardTitle, CardContent } from "$lib/components/ui/card";
   import { Badge } from "$lib/components/ui/badge";
+  import {
+    Tabs,
+    TabsContent,
+    TabsList,
+    TabsTrigger,
+  } from "$lib/components/ui/tabs";
   import { enhance } from "$app/forms";
   import { goto } from "$app/navigation";
   import type { PageData } from "./$types";
   import { toast, Toaster } from "svelte-sonner";
+  import type { Mess } from "$lib/stores";
+  import {
+    messagesStore,
+    unseenMessages,
+    setCurrentUser,
+    currentChatUser,
+  } from "$lib/stores";
+  import {
+    DropdownMenu,
+    DropdownMenuTrigger,
+    DropdownMenuContent,
+    DropdownMenuItem,
+  } from "$lib/components/ui/dropdown-menu";
+
+  $effect(() => {
+    if (data?.user?.id) setCurrentUser(data.user.id);
+  });
 
   let { data }: { data: PageData } = $props();
   const myId = data.user.id;
+
   interface User {
     id: string;
     name: string;
     avatar: string;
   }
 
-  interface Mess {
-    id: number;
-    sender_id: string;
-    receiver_id: string;
-    content: string;
-    created_at: Date;
-    fromSelf: boolean;
-  }
-
   let users = $state<User[]>(data.users || []);
+  let allUsers = $state<User[]>(data.allUsers || []);
+  let chatUsers = $state<User[]>(data.chatUsers || []);
   let select = $state<User | null>(null);
   let mes = $state<Mess[]>([]);
   let input = $state("");
+  let activeTab = $state("chats");
+  let dropdownOpen = $state(false);
+  async function markAsSeen(msg: Mess) {
+    messagesStore.update(($messages) =>
+      $messages.map((m) => (m.id === msg.id ? { ...m, seen: true } : m)),
+    );
+
+    try {
+      await fetch(`/chat/mark-seen/${msg.id}`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch (err) {
+      console.error("Failed to mark message as seen", err);
+    }
+  }
 
   $effect(() => {
     const source = new EventSource("/chat/stream");
     source.onmessage = (ev: MessageEvent) => {
       try {
-        const payload = JSON.parse(ev.data);
+        const payload: Mess = JSON.parse(ev.data);
         if (payload.receiver_id === myId && payload.sender_id !== myId) {
           const sender = users.find((u) => u.id === payload.sender_id);
           const senderName = sender ? sender.name : "Unknown";
-
+          messagesStore.update(($messages) => [
+            ...$messages,
+            { ...payload, seen: false, fromSelf: false },
+          ]);
           toast(`New message from ${senderName}: ${payload.content}`);
         }
       } catch (err) {
@@ -53,7 +89,9 @@
   });
   let _initSelected = (() => {
     if (data.selectedUserId) {
-      const preselect = users.find((u) => u.id === data.selectedUserId);
+      const preselect = [...chatUsers, ...allUsers].find(
+        (u) => u.id === data.selectedUserId,
+      );
       if (preselect) select = preselect;
     }
   })();
@@ -103,6 +141,7 @@
                   receiver_id: payload.receiver_id,
                   content: payload.content,
                   created_at: new Date(),
+                  seen: false,
                   fromSelf: false,
                 },
               ];
@@ -120,18 +159,58 @@
       mes = data.messages.map((msg: any) => ({
         ...msg,
         fromSelf: msg.sender_id === data.user.id,
-        created_at: new Date(msg.created_at),
+        created_at: parseToDate(msg.created_at),
       }));
-      const selectedUser = users.find((u) => u.id === data.selectedUserId);
+      const selectedUser = [...chatUsers, ...allUsers].find(
+        (u) => u.id === data.selectedUserId,
+      );
       if (selectedUser) select = selectedUser;
     }
   });
-
   async function sel(selectedUser: User) {
     if (select && select.id === selectedUser.id) return;
+
+    if (select !== null) {
+      const previousUserId = select.id;
+
+      messagesStore.update(($messages) =>
+        $messages.map((msg) =>
+          msg.sender_id === previousUserId && !msg.fromSelf
+            ? { ...msg, seen: true }
+            : msg,
+        ),
+      );
+
+      try {
+        await fetch(`/chat/mark-seen-by-user/${previousUserId}`, {
+          method: "POST",
+        });
+      } catch (err) {
+        console.error("Failed to mark previous chat messages as seen", err);
+      }
+    }
+
     select = selectedUser;
+    currentChatUser.set(selectedUser.id);
+
     mes = [];
     await loadMessages(selectedUser.id);
+
+    messagesStore.update(($messages) =>
+      $messages.map((msg) =>
+        msg.sender_id === selectedUser.id && !msg.fromSelf
+          ? { ...msg, seen: true }
+          : msg,
+      ),
+    );
+
+    try {
+      await fetch(`/chat/mark-seen-by-user/${selectedUser.id}`, {
+        method: "POST",
+      });
+    } catch (err) {
+      console.error("Failed to mark current chat messages as seen", err);
+    }
 
     const url = new URL(window.location.href);
     url.searchParams.set("user", selectedUser.id);
@@ -173,6 +252,7 @@
       content: messageContent,
       created_at: new Date(),
       fromSelf: true,
+      seen: true,
     };
 
     mes = [...mes, newMessage];
@@ -197,6 +277,15 @@
     }
   }
 
+  function parseToDate(input: string | Date): Date {
+    if (input instanceof Date) return input;
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(input)) {
+      return new Date(input.replace(" ", "T") + "Z");
+    }
+
+    return new Date(input);
+  }
+
   function formatTime(date: Date) {
     const d = new Date(date);
     const hours = d.getHours();
@@ -217,11 +306,55 @@
       <div class="flex flex-wrap items-center gap-2">
         <span>Chats</span>
         <Badge variant="secondary" class="bg-blue-100 text-blue-800"
-          >{users.length}</Badge
+          >{activeTab === "chats" ? chatUsers.length : allUsers.length}</Badge
         >
       </div>
       <div class="flex items-center gap-2">
         <span class="text-xs sm:text-sm">Welcome {data.user.name}</span>
+        <div class="relative">
+          <DropdownMenu bind:open={dropdownOpen}>
+            <DropdownMenuTrigger>
+              <button
+                class="relative px-3 py-2 bg-[#0073B1] text-white rounded-full"
+              >
+                {String.fromCodePoint(0x1f514)}
+                {#if $unseenMessages.length > 0}
+                  <span
+                    class="absolute top-0 right-0 bg-red-600 text-white rounded-full px-1 text-xs"
+                  >
+                    {$unseenMessages.length}
+                  </span>
+                {/if}
+              </button>
+            </DropdownMenuTrigger>
+
+            <DropdownMenuContent
+              class="w-64 bg-[#0073B1] shadow-lg border rounded-lg"
+            >
+              {#each $unseenMessages as msg (msg.id)}
+                <DropdownMenuItem
+                  class="p-2 bg-[#0073B1] hover:bg-blue-500 cursor-pointer w-full text-left flex justify-between items-center text-white"
+                  onclick={() => markAsSeen(msg)}
+                >
+                  <div class="font-semibold truncate">
+                    {users.find((u) => u.id === msg.sender_id)?.name ??
+                      "Unknown"}
+                  </div>
+                  <div class="text-sm truncate">{msg.content}</div>
+                </DropdownMenuItem>
+              {/each}
+
+              {#if $unseenMessages.length === 0}
+                <DropdownMenuItem
+                  class="text-white cursor-default bg-[#0073B1]"
+                >
+                  No new messages
+                </DropdownMenuItem>
+              {/if}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
         <form method="POST" action="?/logout" use:enhance>
           <Button
             type="submit"
@@ -234,33 +367,93 @@
         </form>
       </div>
     </div>
+    
     <div class="flex-1 overflow-y-auto custom-scrollbar">
-      <div class="px-4 py-2">
-        {#if users.length === 0}
-          <div class="p-4 text-gray-400 font-bold">No users yet</div>
-        {/if}
-        {#each users as userItem}
-          <button
-            type="button"
-            class="w-full text-left mb-2 transition-transform hover:scale-[1.02]"
-            onclick={() => sel(userItem)}
-          >
-            <Card
-              class={`rounded-xl shadow-md ${select?.id === userItem.id ? "bg-blue-100" : "bg-white hover:bg-gray-50"}`}
-            >
-              <CardContent class="flex gap-3 p-3">
-                <Avatar>
-                  <AvatarImage src={userItem.avatar} alt={userItem.name} />
-                  <AvatarFallback class="bg-[#0073B1] text-white"
-                    >{userItem.name[0]}</AvatarFallback
-                  >
-                </Avatar>
-                <span class="font-medium text-gray-800">{userItem.name}</span>
-              </CardContent>
-            </Card>
-          </button>
-        {/each}
-      </div>
+      <Tabs bind:value={activeTab} class="h-full flex flex-col">
+        <div class="px-4 flex justify-center py-1 bg-gray-100">
+          <TabsList class="grid w-full grid-cols-2 bg-gray-100 rounded-full">
+            <TabsTrigger value="chats" class="rounded-full px-4 py-1">
+              Chats
+              <Badge variant="secondary" class="ml-2 bg-blue-100 text-blue-800">
+                {chatUsers.length}
+              </Badge>
+            </TabsTrigger>
+            <TabsTrigger value="all-users" class="rounded-full px-4 py-1">
+              All Users
+              <Badge
+                variant="secondary"
+                class="ml-2 bg-green-100 text-green-800"
+              >
+                {allUsers.length}
+              </Badge>
+            </TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="chats" class="flex-1 overflow-y-auto">
+          <div class="px-4 py-2">
+            {#if chatUsers.length === 0}
+              <div class="p-4 text-gray-400 font-bold">
+                No conversations yet
+              </div>
+            {/if}
+            {#each chatUsers as userItem}
+              <button
+                type="button"
+                class="w-full text-left mb-2 transition-transform hover:scale-[1.02]"
+                onclick={() => sel(userItem)}
+              >
+                <Card
+                  class={`rounded-xl shadow-md ${select?.id === userItem.id ? "bg-blue-100" : "bg-white hover:bg-gray-50"}`}
+                >
+                  <CardContent class="flex gap-3 p-3">
+                    <Avatar>
+                      <AvatarImage src={userItem.avatar} alt={userItem.name} />
+                      <AvatarFallback class="bg-[#0073B1] text-white"
+                        >{userItem.name[0]}</AvatarFallback
+                      >
+                    </Avatar>
+                    <span class="font-medium text-gray-800"
+                      >{userItem.name}</span
+                    >
+                  </CardContent>
+                </Card>
+              </button>
+            {/each}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="all-users" class="flex-1 overflow-y-auto">
+          <div class="px-4 py-2 pr-0.5">
+            {#if allUsers.length === 0}
+              <div class="p-4 text-gray-400 font-bold">No users yet</div>
+            {/if}
+            {#each allUsers as userItem}
+              <button
+                type="button"
+                class="w-full text-left mb-2 transition-transform hover:scale-[1.02]"
+                onclick={() => sel(userItem)}
+              >
+                <Card
+                  class={`rounded-xl shadow-md ${select?.id === userItem.id ? "bg-blue-100" : "bg-white hover:bg-gray-50"}`}
+                >
+                  <CardContent class="flex gap-3 p-3">
+                    <Avatar>
+                      <AvatarImage src={userItem.avatar} alt={userItem.name} />
+                      <AvatarFallback class="bg-[#0073B1] text-white"
+                        >{userItem.name[0]}</AvatarFallback
+                      >
+                    </Avatar>
+                    <span class="font-medium text-gray-800"
+                      >{userItem.name}</span
+                    >
+                  </CardContent>
+                </Card>
+              </button>
+            {/each}
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   </div>
 
@@ -295,6 +488,7 @@
           No messages yet
         </div>
       {/if}
+
       {#each mes as msg}
         <div
           class="flex"
@@ -335,11 +529,8 @@
 <Toaster position="top-right" />
 
 <style>
-  .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-  }
-  .custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: rgba(0, 0, 0, 0.2);
-    border-radius: 3px;
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
   }
 </style>
