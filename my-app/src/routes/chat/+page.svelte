@@ -457,7 +457,7 @@
     </div>
   </div>
 
-  <div class="flex-1 flex flex-col">
+  <div class="flex-1 flex flex-col custom-scrollbar">
     <div
       class="h-16 flex items-center px-4 bg-gray-100 border-b border-gray-200"
     >
