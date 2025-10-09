@@ -155,18 +155,30 @@
   });
 
   $effect(() => {
-    if (data.messages && data.selectedUserId) {
-      mes = data.messages.map((msg: any) => ({
-        ...msg,
-        fromSelf: msg.sender_id === data.user.id,
-        created_at: parseToDate(msg.created_at),
-      }));
-      const selectedUser = [...chatUsers, ...allUsers].find(
-        (u) => u.id === data.selectedUserId,
-      );
-      if (selectedUser) select = selectedUser;
+  if (data.messages && data.selectedUserId) {
+    const msgs = data.messages.map((msg: any) => ({
+      ...msg,
+      fromSelf: msg.sender_id === data.user.id,
+      created_at: parseToDate(msg.created_at),
+    }));
+    mes = msgs;
+    messagesStore.set(msgs);
+    const selectedUser = [...chatUsers, ...allUsers].find(
+      (u) => u.id === data.selectedUserId,
+    );
+    if (selectedUser) select = selectedUser;
+    const unseenIds = msgs.filter(m => !m.fromSelf && !m.seen).map(m => m.id);
+    if (unseenIds.length > 0) {
+      for (const id of unseenIds) {
+        fetch(`/chat/mark-seen/${id}`, {
+          method: "POST",
+          credentials: "include"
+        }).catch(err => console.error("Failed to mark message as seen", err));
+      }
     }
-  });
+  }
+});
+
   async function sel(selectedUser: User) {
     if (select && select.id === selectedUser.id) return;
 
@@ -217,29 +229,55 @@
     goto(url.pathname + url.search, { replaceState: true });
   }
 
-  async function loadMessages(userId: string) {
-    try {
-      const targetUserId = userId;
-      const formData = new FormData();
-      formData.append("user_id", userId);
-      const response = await fetch("?/loadMessages", {
-        method: "POST",
-        body: formData,
-        cache: "no-store",
-        credentials: "include",
-      });
-      const result = await response.json();
-      if (result.messages && select && select.id == targetUserId) {
-        mes = result.messages.map((msg: any) => ({
-          ...msg,
-          fromSelf: msg.sender_id === data.user.id,
-          created_at: new Date(msg.created_at),
-        }));
+
+
+async function loadMessages(userId: string) {
+  try {
+    const formData = new FormData();
+    formData.append("user_id", userId);
+    const response = await fetch("?/loadMessages", {
+      method: "POST",
+      body: formData,
+      cache: "no-store",
+      credentials: "include",
+    });
+    const result = await response.json();
+
+    if (result.messages && select && select.id === userId) {
+      const loadedMessages: Mess[] = result.messages.map((msg: any) => ({
+        ...msg,
+        fromSelf: msg.sender_id === data.user.id,
+        created_at: new Date(msg.created_at),
+        seen: msg.seen
+      }));
+      mes = loadedMessages;
+      const unseenMessages: Mess[] = loadedMessages.filter(m => !m.fromSelf && !m.seen);
+
+      if (unseenMessages.length > 0) {
+        messagesStore.update(($messages: Mess[]) => {
+          const ids = unseenMessages.map((m: Mess) => m.id);
+          return $messages.map((m: Mess) =>
+            ids.includes(m.id) ? { ...m, seen: true } : m
+          );
+        });
+        for (const msg of unseenMessages) {
+          try {
+            await fetch(`/chat/mark-seen/${msg.id}`, {
+              method: "POST",
+              credentials: "include"
+            });
+          } catch (err) {
+            console.error("Failed to mark message as seen", err);
+          }
+        }
       }
-    } catch (error) {
-      console.error("Error loading messages:", error);
     }
+  } catch (error) {
+    console.error("Error loading messages:", error);
   }
+}
+
+
 
   async function message() {
     if (!input.trim() || !select) return;
