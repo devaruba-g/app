@@ -367,7 +367,7 @@
         </form>
       </div>
     </div>
-    
+
     <div class="flex-1 overflow-y-auto custom-scrollbar">
       <Tabs bind:value={activeTab} class="h-full flex flex-col">
         <div class="px-4 flex justify-center py-1 bg-gray-100">
@@ -423,7 +423,7 @@
           </div>
         </TabsContent>
 
-        <TabsContent value="all-users" class="flex-1 overflow-y-auto">
+        <TabsContent value="all-users" class="flex-1 overflow-y-auto ">
           <div class="px-4 py-2 pr-0.5">
             {#if allUsers.length === 0}
               <div class="p-4 text-gray-400 font-bold">No users yet</div>
@@ -457,7 +457,7 @@
     </div>
   </div>
 
-  <div class="flex-1 flex flex-col">
+  <div class="flex-1 flex flex-col custom-scrollbar">
     <div
       class="h-16 flex items-center px-4 bg-gray-100 border-b border-gray-200"
     >
