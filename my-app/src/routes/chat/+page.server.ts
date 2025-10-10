@@ -61,10 +61,31 @@ export let load: PageServerLoad = async ({ locals, url }) => {
       console.error('Error loading messages:', error);
     }
   }
+   if (selectedUserId) {
+  // Mark messages as seen first
+  await db.execute(
+    'UPDATE chat SET seen = TRUE WHERE sender_id = ? AND receiver_id = ? AND seen = FALSE',
+    [selectedUserId, locals.user.id]
+  );
+
+  // Then load messages
+  try {
+    let [messageRows] = await db.execute<ChatMessage[]>(
+      'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY created_at ASC',
+      [locals.user.id, selectedUserId, selectedUserId, locals.user.id]
+    );
+    messages = messageRows;
+  } catch (error) {
+    console.error('Error loading messages:', error);
+  }
+}
+
 let [unseenRows] = await db.execute<ChatMessage[]>(
-  'SELECT * FROM chat WHERE receiver_id = ? AND seen = FALSE ORDER BY created_at ASC',
-  [locals.user.id]
+  'SELECT * FROM chat WHERE receiver_id = ? AND seen = FALSE' + (selectedUserId ? ' AND sender_id != ?' : '') + ' ORDER BY created_at ASC',
+  selectedUserId ? [locals.user.id, selectedUserId] : [locals.user.id]
 );
+
+
 
   return {
     user: locals.user,

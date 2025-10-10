@@ -83,14 +83,16 @@ function scrollToBottom() {
 $effect(() => {
   if (data.unseenMessages?.length) {
     for (const msg of data.unseenMessages) {
-      const sender = users.find(u => u.id === msg.sender_id);
-      const senderName = sender ? sender.name : 'Unknown';
-      toast(`New message from ${senderName}: ${msg.content}`);
+      if (select?.id !== msg.sender_id) { // <-- ignore messages from current chat
+        const sender = users.find(u => u.id === msg.sender_id);
+        const senderName = sender ? sender.name : 'Unknown';
+        toast(`New message from ${senderName}: ${msg.content}`);
+      }
     }
-
-    
   }
 });
+
+
 
   $effect(() => {
     const source = new EventSource("/chat/stream");
@@ -229,55 +231,58 @@ $effect(() => {
 });
 
   async function sel(selectedUser: User) {
-    if (select && select.id === selectedUser.id) return;
+  if (select && select.id === selectedUser.id) return;
 
-    if (select !== null) {
-      const previousUserId = select.id;
-
-      messagesStore.update(($messages) =>
-        $messages.map((msg) =>
-          msg.sender_id === previousUserId && !msg.fromSelf
-            ? { ...msg, seen: true }
-            : msg,
-        ),
-      );
-
-      try {
-        await fetch(`/chat/mark-seen-by-user/${previousUserId}`, {
-          method: "POST",
-        });
-      } catch (err) {
-        console.error("Failed to mark previous chat messages as seen", err);
-      }
-    }
-
-    select = selectedUser;
-    currentChatUser.set(selectedUser.id);
-
-    mes = [];
-    await loadMessages(selectedUser.id);
+  if (select !== null) {
+    const previousUserId = select.id;
 
     messagesStore.update(($messages) =>
       $messages.map((msg) =>
-        msg.sender_id === selectedUser.id && !msg.fromSelf
+        msg.sender_id === previousUserId && !msg.fromSelf
           ? { ...msg, seen: true }
           : msg,
       ),
     );
 
     try {
-      await fetch(`/chat/mark-seen-by-user/${selectedUser.id}`, {
+      // Mark previous chat messages as seen in DB
+      await fetch(`/chat/mark-seen-by-user/${previousUserId}`, {
         method: "POST",
       });
     } catch (err) {
-      console.error("Failed to mark current chat messages as seen", err);
+      console.error("Failed to mark previous chat messages as seen", err);
     }
-
-    const url = new URL(window.location.href);
-    url.searchParams.set("user", selectedUser.id);
-    goto(url.pathname + url.search, { replaceState: true });
   }
 
+  select = selectedUser;
+  currentChatUser.set(selectedUser.id);
+
+  // ✅ Mark messages as seen in DB immediately for the new chat
+  try {
+    await fetch(`/chat/mark-seen-by-user/${selectedUser.id}`, {
+      method: "POST",
+    });
+  } catch (err) {
+    console.error("Failed to mark current chat messages as seen", err);
+  }
+
+  // Then load messages (messages are already marked seen)
+  mes = [];
+  await loadMessages(selectedUser.id);
+
+  // Update frontend store
+  messagesStore.update(($messages) =>
+    $messages.map((msg) =>
+      msg.sender_id === selectedUser.id && !msg.fromSelf
+        ? { ...msg, seen: true }
+        : msg,
+    ),
+  );
+
+  const url = new URL(window.location.href);
+  url.searchParams.set("user", selectedUser.id);
+  goto(url.pathname + url.search, { replaceState: true });
+}
 
 
 async function loadMessages(userId: string) {
