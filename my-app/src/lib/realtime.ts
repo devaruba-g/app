@@ -21,7 +21,7 @@ interface RealtimeMessage extends RowDataPacket {
   content: string;
   created_at: string;
   seen: boolean;
-  msg_type: 'text' | 'image';
+  msg_type?: 'text' | 'image';
 }
 
 type Listener = (event: ChatEvent) => void;
@@ -57,7 +57,7 @@ export async function pollNewMessages(userId: string, since: Date): Promise<Chat
         receiver_id: row.receiver_id,
         content: row.content,
         image_url: null,
-        msg_type: row.msg_type || 'text',
+        msg_type: (row.msg_type || 'text') as 'text' | 'image',
         created_at: row.created_at
       }
     }));

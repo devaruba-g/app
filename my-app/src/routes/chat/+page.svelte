@@ -295,9 +295,18 @@ async function loadMessages(userId: string) {
       credentials: "include",
     });
     const result = await response.json();
+    
+    // SvelteKit wraps action results - extract the actual data
+    let actionData;
+    if (result.type === 'success' && result.data) {
+      const parsed = JSON.parse(result.data);
+      actionData = Array.isArray(parsed) ? parsed[0] : parsed;
+    } else {
+      actionData = result;
+    }
 
-    if (result.messages && select && select.id === userId) {
-      const loadedMessages: Mess[] = result.messages.map((msg: any) => ({
+    if (actionData?.messages && Array.isArray(actionData.messages) && select && select.id === userId) {
+      const loadedMessages: Mess[] = actionData.messages.map((msg: any) => ({
         ...msg,
         fromSelf: msg.sender_id === data.user.id,
         created_at: parseToDate(msg.created_at),
@@ -384,13 +393,25 @@ async function message() {
 
     if (!response.ok) {
       console.error("Network error sending message:", response.status, await response.text());
+      toast.error("Network error sending message: " + (await response.text() || "Unknown error"));
       return;
     }
     
     const result = await response.json();
     console.log("Send message result:", result);
-    if (!result.success) {
-      console.error("Failed to send message:", result.message);
+    
+    // SvelteKit wraps action results - extract the actual data
+    let actionData;
+    if (result.type === 'success' && result.data) {
+      const parsed = JSON.parse(result.data);
+      actionData = Array.isArray(parsed) ? parsed[0] : parsed;
+    } else {
+      actionData = result;
+    }
+    
+    if (!actionData?.success) {
+      console.error("Failed to send message:", actionData.message);
+      toast.error("Failed to send message: " + (actionData.message || "Unknown error"));
       return;
     }
 
@@ -401,11 +422,11 @@ async function message() {
 
   } catch (error) {
     console.error("Error sending message:", error);
+    toast.error("Error sending message");
   }
 }
 
-
- function handleImageUpload(e: Event) {
+function handleImageUpload(e: Event) {
   const target = e.target as HTMLInputElement;
   const file = target.files?.[0];
   if (!file || !select) return;

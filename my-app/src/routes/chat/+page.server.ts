@@ -116,22 +116,43 @@ const offset = now.getTimezoneOffset() * 60000;
 const localTime = new Date(now.getTime() - offset);
 const mysqlTime = localTime.toISOString().slice(0, 19).replace('T', ' ');
 
-const [result] = await db.execute<ResultSetHeader>(
-  'INSERT INTO chat (sender_id, receiver_id, content, created_at, seen) VALUES (?, ?, ?, ?, FALSE)',
-  [sender_id, receiver_id, content, mysqlTime]
-);
+// Try with msg_type column first, fallback if column doesn't exist
+let result;
+try {
+  [result] = await db.execute<ResultSetHeader>(
+    'INSERT INTO chat (sender_id, receiver_id, content, msg_type, created_at, seen) VALUES (?, ?, ?, ?, ?, FALSE)',
+    [sender_id, receiver_id, content, type, mysqlTime]
+  );
+} catch (colErr: any) {
+  // Fallback: column doesn't exist yet, insert without msg_type
+  if (colErr?.code === 'ER_BAD_FIELD_ERROR') {
+    [result] = await db.execute<ResultSetHeader>(
+      'INSERT INTO chat (sender_id, receiver_id, content, created_at, seen) VALUES (?, ?, ?, ?, FALSE)',
+      [sender_id, receiver_id, content, mysqlTime]
+    );
+  } else {
+    throw colErr;
+  }
+}
 
 
       const insertedId = (result as ResultSetHeader).insertId;
       publish({
         type: 'message',
-        data: { id: insertedId, sender_id, receiver_id, content, image_url: null,
-    msg_type: 'text',created_at: mysqlTime
- }
+        data: { 
+          id: insertedId, 
+          sender_id, 
+          receiver_id, 
+          content, 
+          image_url: null,
+          msg_type: type as 'text' | 'image',
+          created_at: mysqlTime
+        }
       });
       return { success: true, id: insertedId };
     } catch (err) {
-      return { success: false, message: 'Database error' };
+      console.error('Send message error:', err);
+      return { success: false, message: err instanceof Error ? err.message : 'Database error' };
     }
   },
 
