@@ -20,8 +20,7 @@
     data: { user: { id: string; name: string; email: string } | null };
     form: { type?: string; message?: string; redirect?: string };
   } = $props();
-  let loadingSignIn = $state(false);
-  let loadingSignUp = $state(false);
+ 
   $effect(() => {
     if (form?.type === "success" && form.redirect === "signin") {
       goto("/chat");
@@ -32,11 +31,7 @@
     if (browser && data.user) goto("/chat");
   });
 </script>
-{#if loadingSignIn || loadingSignUp}
-  <div class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-    <div class="loader ease-linear rounded-full border-8 border-t-8 border-gray-200 h-20 w-20"></div>
-  </div>
-{/if}
+
 <div class="min-h-screen flex flex-col bg-gray-50">
   <header class="w-full bg-[#0073b1] text-white text-center py-6 shadow">
     <h1 class="text-4xl font-bold">Welcome to Your Chat Hub</h1>
@@ -75,7 +70,6 @@
               method="POST"
               action="?/signin"
               use:enhance
-              onsubmit={() => (loadingSignIn = true)}
               class="flex flex-col gap-4"
             >
               <Input
@@ -109,7 +103,7 @@
                 type="submit"
                 class="mt-2 bg-[#0073b1] hover:bg-blue-700 text-white"
               >
-                 {loadingSignIn ? "Signing In..." : "Sign In"}
+                Sign In
               </Button>
             </form>
           </Tabs.Content>
@@ -119,7 +113,6 @@
               method="POST"
               action="?/signup"
               use:enhance
-              onsubmit={() => (loadingSignUp = true)}
               class="flex flex-col gap-4"
             >
               <Input
@@ -154,7 +147,7 @@
                 type="submit"
                 class="mt-2 bg-[#0073b1] hover:bg-blue-700 text-white"
               >
-                 {loadingSignUp ? "Signing Up..." : "Sign Up"}
+                Sign Up
               </Button>
             </form>
           </Tabs.Content>
