@@ -245,7 +245,7 @@ $effect(() => {
     );
 
     try {
-      // Mark previous chat messages as seen in DB
+      
       await fetch(`/chat/mark-seen-by-user/${previousUserId}`, {
         method: "POST",
       });
@@ -257,7 +257,6 @@ $effect(() => {
   select = selectedUser;
   currentChatUser.set(selectedUser.id);
 
-  // ✅ Mark messages as seen in DB immediately for the new chat
   try {
     await fetch(`/chat/mark-seen-by-user/${selectedUser.id}`, {
       method: "POST",
@@ -266,11 +265,11 @@ $effect(() => {
     console.error("Failed to mark current chat messages as seen", err);
   }
 
-  // Then load messages (messages are already marked seen)
+
   mes = [];
   await loadMessages(selectedUser.id);
 
-  // Update frontend store
+
   messagesStore.update(($messages) =>
     $messages.map((msg) =>
       msg.sender_id === selectedUser.id && !msg.fromSelf
@@ -333,9 +332,10 @@ async function loadMessages(userId: string) {
 
 
 async function message() {
-  if (!input.trim() && !selectedImage) return; 
-  if (!select) return;
+  if (!input.trim() && !selectedImage) return; // nothing to send
+  if (!select) return; // no user selected
 
+  // Prepare message type and content
   let msgType: "text" | "image" = "text";
   let messageContent: string = input;
 
@@ -343,15 +343,18 @@ async function message() {
   formData.append("receiver_id", select.id);
 
   if (selectedImage && imagePreview) {
+    // Sending an image
     msgType = "image";
     messageContent = imagePreview;
     formData.append("content", imagePreview);
     formData.append("type", "image");
   } else {
+    // Sending text
     formData.append("content", input);
     formData.append("type", "text");
   }
 
+  // Optimistic update: add message to UI immediately
   const newMessage: Mess = {
     id: Date.now(),
     sender_id: data.user.id,
@@ -364,26 +367,43 @@ async function message() {
   };
 
   mes = [...mes, newMessage];
+  messagesStore.update(($messages) => [...$messages, newMessage]);
 
-
+  // Clear input & image
   input = "";
   selectedImage = null;
   imagePreview = null;
 
   try {
-    const response = await fetch("?/sendMessage", {
+    // Correct fetch URL for page action
+    const response = await fetch("/chat?/sendMessage", {
       method: "POST",
       body: formData,
       credentials: "include",
     });
-    const result = await response.json();
-    if (!result.success) console.error("Failed to send message:", result.message);
 
-    if (select?.id) await loadMessages(select.id);
+    if (!response.ok) {
+      console.error("Network error sending message:", response.status, await response.text());
+      return;
+    }
+    
+    const result = await response.json();
+    console.log("Send message result:", result);
+    if (!result.success) {
+      console.error("Failed to send message:", result.message);
+      return;
+    }
+
+    // Optionally reload messages from server to sync
+    if (select?.id) {
+      await loadMessages(select.id);
+    }
+
   } catch (error) {
     console.error("Error sending message:", error);
   }
 }
+
 
  function handleImageUpload(e: Event) {
   const target = e.target as HTMLInputElement;

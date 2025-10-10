@@ -1,12 +1,18 @@
 import type { RequestHandler } from '@sveltejs/kit';
-import { subscribe, toSseChunk } from '$lib/realtime';
+import { pollNewMessages, toSseChunk } from '$lib/realtime';
 
-export const GET: RequestHandler = async ({ request }) => {
-  let unsubscribe: (() => void) | null = null;
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
+export const GET: RequestHandler = async ({ request, locals }) => {
+  if (!locals.user) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  const userId = locals.user.id;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+  let lastPoll = new Date();
+
   const stream = new ReadableStream({
-    start(controller) {
+    async start(controller) {
       const encoder = new TextEncoder();
       const safeEnqueue = (chunk: string) => {
         if (closed) return;
@@ -14,31 +20,36 @@ export const GET: RequestHandler = async ({ request }) => {
           controller.enqueue(encoder.encode(chunk));
         } catch (e) {
           closed = true;
-          if (heartbeat) clearInterval(heartbeat);
-          if (unsubscribe) unsubscribe();
+          if (pollInterval) clearInterval(pollInterval);
         }
       };
 
       safeEnqueue('retry: 3000\n\n');
       safeEnqueue(': connected\n\n');
-      unsubscribe = subscribe((event) => {
-        safeEnqueue(toSseChunk(event));
-      });
 
-      heartbeat = setInterval(() => {
-        safeEnqueue(': ping\n\n');
-      }, 15000);
+      // Poll database every 2 seconds for new messages
+      pollInterval = setInterval(async () => {
+        try {
+          const events = await pollNewMessages(userId, lastPoll);
+          lastPoll = new Date();
+          
+          for (const event of events) {
+            safeEnqueue(toSseChunk(event));
+          }
+        } catch (err) {
+          console.error('Polling error:', err);
+        }
+      }, 2000);
+
       request.signal.addEventListener('abort', () => {
         closed = true;
-        if (heartbeat) clearInterval(heartbeat);
-        if (unsubscribe) unsubscribe();
+        if (pollInterval) clearInterval(pollInterval);
       });
     },
 
     cancel() {
       closed = true;
-      if (heartbeat) clearInterval(heartbeat);
-      if (unsubscribe) unsubscribe();
+      if (pollInterval) clearInterval(pollInterval);
     }
   });
   
@@ -46,7 +57,8 @@ export const GET: RequestHandler = async ({ request }) => {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive'
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
     }
   });
 };
