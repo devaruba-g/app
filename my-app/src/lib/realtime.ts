@@ -5,6 +5,8 @@ type ChatEvent = {
     sender_id: string;
     receiver_id: string;
     content: string;
+      image_url: string | null;
+      msg_type: 'text' | 'image';
     created_at?: string;
   };
 };

@@ -14,6 +14,8 @@ interface ChatMessage extends RowDataPacket {
   sender_id: string;
   receiver_id: string;
   content: string;
+  image_url: string | null;
+  msg_type: 'text' | 'image';
   created_at: Date;
   seen: boolean;
 }
@@ -59,6 +61,10 @@ export let load: PageServerLoad = async ({ locals, url }) => {
       console.error('Error loading messages:', error);
     }
   }
+let [unseenRows] = await db.execute<ChatMessage[]>(
+  'SELECT * FROM chat WHERE receiver_id = ? AND seen = FALSE ORDER BY created_at ASC',
+  [locals.user.id]
+);
 
   return {
     user: locals.user,
@@ -66,7 +72,8 @@ export let load: PageServerLoad = async ({ locals, url }) => {
     allUsers,
     chatUsers,
     messages,
-    selectedUserId
+    selectedUserId,
+    unseenMessages: unseenRows
   };
 };
 
@@ -75,20 +82,31 @@ export let actions: Actions = {
     try {
       let form = await request.formData();
       let content = (form.get('content') as string)?.trim();
+      let type = (form.get('type') as string) || 'text';
+
       let receiver_id = form.get('receiver_id') as string;
       let sender_id = locals.user?.id;
       if (!sender_id) return { success: false, message: 'You must be logged in' };
       if (!receiver_id || !content) return { success: false, message: 'Missing data' };
 
-      const [result] = await db.execute<ResultSetHeader>(
-        'INSERT INTO chat (sender_id, receiver_id, content, seen) VALUES (?, ?, ?, FALSE)',
-        [sender_id, receiver_id, content]
-      );
+
+const now = new Date();
+const offset = now.getTimezoneOffset() * 60000; 
+const localTime = new Date(now.getTime() - offset);
+const mysqlTime = localTime.toISOString().slice(0, 19).replace('T', ' ');
+
+const [result] = await db.execute<ResultSetHeader>(
+  'INSERT INTO chat (sender_id, receiver_id, content, created_at, seen) VALUES (?, ?, ?, ?, FALSE)',
+  [sender_id, receiver_id, content, mysqlTime]
+);
+
 
       const insertedId = (result as ResultSetHeader).insertId;
       publish({
         type: 'message',
-        data: { id: insertedId, sender_id, receiver_id, content, created_at: new Date().toISOString() }
+        data: { id: insertedId, sender_id, receiver_id, content, image_url: null,
+    msg_type: 'text',created_at: mysqlTime
+ }
       });
       return { success: true, id: insertedId };
     } catch (err) {

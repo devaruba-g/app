@@ -8,8 +8,11 @@ export interface Mess {
   receiver_id: string;
   content: string;
   created_at: Date;
+   image_url?: string | null;
+  type: 'text' | 'image';
   seen: boolean;
   fromSelf: boolean;
+
 }
 
 export const currentChatUser = writable<string | null>(null);

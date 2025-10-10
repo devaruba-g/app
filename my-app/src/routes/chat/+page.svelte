@@ -52,6 +52,20 @@
   let input = $state("");
   let activeTab = $state("chats");
   let dropdownOpen = $state(false);
+let imagePreview = $state<string | null>(null);
+let selectedImage = $state<File | null>(null);
+let messagesContainer: HTMLDivElement | null = null;
+function scrollToBottom() {
+  if (messagesContainer) {
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+}
+  $effect(() => {
+  mes;
+  scrollToBottom();
+});
+
+
   async function markAsSeen(msg: Mess) {
     messagesStore.update(($messages) =>
       $messages.map((m) => (m.id === msg.id ? { ...m, seen: true } : m)),
@@ -66,25 +80,40 @@
       console.error("Failed to mark message as seen", err);
     }
   }
+$effect(() => {
+  if (data.unseenMessages?.length) {
+    for (const msg of data.unseenMessages) {
+      const sender = users.find(u => u.id === msg.sender_id);
+      const senderName = sender ? sender.name : 'Unknown';
+      toast(`New message from ${senderName}: ${msg.content}`);
+    }
+
+    
+  }
+});
 
   $effect(() => {
     const source = new EventSource("/chat/stream");
     source.onmessage = (ev: MessageEvent) => {
-      try {
-        const payload: Mess = JSON.parse(ev.data);
-        if (payload.receiver_id === myId && payload.sender_id !== myId) {
-          const sender = users.find((u) => u.id === payload.sender_id);
-          const senderName = sender ? sender.name : "Unknown";
-          messagesStore.update(($messages) => [
-            ...$messages,
-            { ...payload, seen: false, fromSelf: false },
-          ]);
-          toast(`New message from ${senderName}: ${payload.content}`);
-        }
-      } catch (err) {
-        console.error("Error parsing SSE:", err);
+  try {
+    const payload: Mess = JSON.parse(ev.data);
+
+    if (payload.receiver_id === myId && payload.sender_id !== myId) {
+      if (select?.id !== payload.sender_id) {
+        const sender = users.find((u) => u.id === payload.sender_id);
+        const senderName = sender ? sender.name : "Unknown";
+        toast(`New message from ${senderName}: ${payload.content}`);
       }
-    };
+      messagesStore.update(($messages) => [
+        ...$messages,
+        { ...payload, seen: select?.id === payload.sender_id, fromSelf: false },
+      ]);
+    }
+  } catch (err) {
+    console.error("Error parsing SSE:", err);
+  }
+};
+
     return () => source.close();
   });
   let _initSelected = (() => {
@@ -132,6 +161,9 @@
             const exists = mes.some(
               (m) => m.id === payload.id && m.content === payload.content,
             );
+        const inferredType: 'text' | 'image' =
+  payload.type === 'image' || (payload.content?.startsWith?.('data:image/')) ? 'image' : 'text';
+
             if (!exists) {
               mes = [
                 ...mes,
@@ -140,9 +172,10 @@
                   sender_id: payload.sender_id,
                   receiver_id: payload.receiver_id,
                   content: payload.content,
-                  created_at: new Date(),
+                  created_at: parseToDate(payload.created_at),
                   seen: false,
                   fromSelf: false,
+                   type: inferredType,
                 },
               ];
             }
@@ -153,6 +186,22 @@
     };
     return () => source.close();
   });
+$effect(() => {
+  if (data.user?.id) setCurrentUser(data.user.id);
+
+  // Add unseen messages from server to the store
+  if (data.unseenMessages?.length) {
+    messagesStore.update(($messages) => [
+      ...$messages,
+      ...data.unseenMessages.map(msg => ({
+        ...msg,
+        fromSelf: msg.sender_id === data.user.id,
+        type: msg.msg_type || 'text',
+        created_at: parseToDate(msg.created_at)
+      }))
+    ]);
+  }
+});
 
   $effect(() => {
   if (data.messages && data.selectedUserId) {
@@ -247,9 +296,9 @@ async function loadMessages(userId: string) {
       const loadedMessages: Mess[] = result.messages.map((msg: any) => ({
         ...msg,
         fromSelf: msg.sender_id === data.user.id,
-        created_at: new Date(msg.created_at),
-        seen: msg.seen
-      }));
+        created_at: parseToDate(msg.created_at),
+        seen: msg.seen,
+        type: msg.type || 'text'      }));
       mes = loadedMessages;
       const unseenMessages: Mess[] = loadedMessages.filter(m => !m.fromSelf && !m.seen);
 
@@ -278,60 +327,93 @@ async function loadMessages(userId: string) {
 }
 
 
+async function message() {
+  if (!input.trim() && !selectedImage) return; 
+  if (!select) return;
 
-  async function message() {
-    if (!input.trim() || !select) return;
-    const messageContent = input;
-    input = "";
-    const newMessage = {
-      id: Date.now(),
-      sender_id: data.user.id,
-      receiver_id: select.id,
-      content: messageContent,
-      created_at: new Date(),
-      fromSelf: true,
-      seen: true,
-    };
+  let msgType: "text" | "image" = "text";
+  let messageContent: string = input;
 
-    mes = [...mes, newMessage];
+  const formData = new FormData();
+  formData.append("receiver_id", select.id);
 
-    try {
-      const formData = new FormData();
-      formData.append("content", messageContent);
-      formData.append("receiver_id", select.id);
-      const response = await fetch("?/sendMessage", {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      const result = await response.json();
-      if (!result.success)
-        console.error("Failed to save message:", result.message);
-      if (select?.id) {
-        await loadMessages(select.id);
-      }
-    } catch (error) {
-      console.error("Error saving message:", error);
-    }
+  if (selectedImage && imagePreview) {
+    msgType = "image";
+    messageContent = imagePreview;
+    formData.append("content", imagePreview);
+    formData.append("type", "image");
+  } else {
+    formData.append("content", input);
+    formData.append("type", "text");
   }
 
-  function parseToDate(input: string | Date): Date {
-    if (input instanceof Date) return input;
-    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(input)) {
-      return new Date(input.replace(" ", "T") + "Z");
-    }
+  const newMessage: Mess = {
+    id: Date.now(),
+    sender_id: data.user.id,
+    receiver_id: select.id,
+    content: messageContent,
+    created_at: new Date(),
+    fromSelf: true,
+    seen: true,
+    type: msgType,
+  };
 
-    return new Date(input);
-  }
+  mes = [...mes, newMessage];
 
-  function formatTime(date: Date) {
-    const d = new Date(date);
-    const hours = d.getHours();
-    const minutes = d.getMinutes().toString().padStart(2, "0");
-    const ampm = hours >= 12 ? "PM" : "AM";
-    const hour12 = hours % 12 || 12;
-    return `${hour12}:${minutes} ${ampm}`;
+
+  input = "";
+  selectedImage = null;
+  imagePreview = null;
+
+  try {
+    const response = await fetch("?/sendMessage", {
+      method: "POST",
+      body: formData,
+      credentials: "include",
+    });
+    const result = await response.json();
+    if (!result.success) console.error("Failed to send message:", result.message);
+
+    if (select?.id) await loadMessages(select.id);
+  } catch (error) {
+    console.error("Error sending message:", error);
   }
+}
+
+ function handleImageUpload(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file || !select) return;
+
+  selectedImage = file;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    imagePreview = reader.result as string;
+  };
+  reader.readAsDataURL(file);
+}
+
+
+function parseToDate(input: string | Date): Date {
+  if (input instanceof Date) return input;
+  const [datePart, timePart] = input.split(' ');
+  const [year, month, day] = datePart.split('-').map(Number);
+  const [hour, minute, second] = timePart.split(':').map(Number);
+  return new Date(year, month - 1, day, hour, minute, second);
+}
+
+
+
+ function formatTime(date: Date) {
+  const d = new Date(date);
+  const hours = d.getHours();
+  const minutes = d.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  const hour12 = hours % 12 || 12;
+  return `${hour12}:${minutes} ${ampm}`;
+}
+
 </script>
 
 <div class="flex flex-col md:flex-row h-screen bg-gray-50">
@@ -518,6 +600,7 @@ async function loadMessages(userId: string) {
     <div
       class="flex-1 overflow-y-auto p-4 bg-gray-50"
       style="max-height: calc(100vh - 64px);"
+      bind:this={messagesContainer}
     >
       {#if !select}
         <div class="text-gray-400 font-bold text-center">No chat selected</div>
@@ -536,7 +619,13 @@ async function loadMessages(userId: string) {
           <div
             class={`p-3 rounded-2xl max-w-[70%] break-words shadow-md text-sm flex justify-between items-center gap-2 ${msg.fromSelf ? "bg-[#0073B1] text-white" : "bg-gray-200 text-gray-800"}`}
           >
-            <span>{msg.content}</span>
+            {#if msg.type === 'image' || msg.content.startsWith('data:image/')}
+            <img src={msg.content} alt="" class="rounded-lg max-w-[200px]" />
+
+{:else}
+  <span>{msg.content}</span>
+{/if}
+
             <span class="text-xs text-black-500"
               >{formatTime(msg.created_at)}</span
             >
@@ -546,6 +635,12 @@ async function loadMessages(userId: string) {
     </div>
 
     <div class="p-4 flex gap-2 bg-gray-100 border-t border-gray-200">
+        {#if imagePreview}
+    <div class="flex items-center gap-2">
+      <img src={imagePreview} alt="Preview" class="h-16 rounded-md" />
+      <button onclick={() => { selectedImage = null; imagePreview = null; }} class="text-red-500">✖</button>
+    </div>
+  {/if}
       <input
         type="text"
         placeholder="Type a message..."
@@ -554,6 +649,20 @@ async function loadMessages(userId: string) {
         onkeydown={(e: KeyboardEvent) => e.key === "Enter" && message()}
         disabled={!select}
       />
+       <input
+    type="file"
+    accept="image/*"
+    id="imageInput"
+    class="hidden"
+    onchange={handleImageUpload}
+  />
+  <Button
+    onclick={() => document.getElementById('imageInput')?.click()}
+    disabled={!select}
+    class="rounded-full bg-gray-200 text-gray-700 px-3 hover:bg-gray-300"
+  >
+    📷
+  </Button>
       <Button
         onclick={message}
         disabled={!select}
@@ -567,8 +676,11 @@ async function loadMessages(userId: string) {
 <Toaster position="top-right" />
 
 <style>
-  .custom-scrollbar {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
-  }
+.custom-scrollbar {
+  scrollbar-color: grey transparent;
+}
+
+
+
+
 </style>
