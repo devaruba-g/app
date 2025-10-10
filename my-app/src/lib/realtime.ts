@@ -31,7 +31,7 @@ export function subscribe(listener: Listener) {
 }
 
 export function publish(event: ChatEvent) {
-  // Publishing happens via database insert
+
 }
 
 export function toSseChunk(event: ChatEvent): string {

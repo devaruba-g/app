@@ -62,13 +62,12 @@ export let load: PageServerLoad = async ({ locals, url }) => {
     }
   }
    if (selectedUserId) {
-  // Mark messages as seen first
+
   await db.execute(
     'UPDATE chat SET seen = TRUE WHERE sender_id = ? AND receiver_id = ? AND seen = FALSE',
     [selectedUserId, locals.user.id]
   );
 
-  // Then load messages
   try {
     let [messageRows] = await db.execute<ChatMessage[]>(
       'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY created_at ASC',
@@ -116,24 +115,14 @@ const offset = now.getTimezoneOffset() * 60000;
 const localTime = new Date(now.getTime() - offset);
 const mysqlTime = localTime.toISOString().slice(0, 19).replace('T', ' ');
 
-// Try with msg_type column first, fallback if column doesn't exist
 let result;
 try {
   [result] = await db.execute<ResultSetHeader>(
     'INSERT INTO chat (sender_id, receiver_id, content, msg_type, created_at, seen) VALUES (?, ?, ?, ?, ?, FALSE)',
     [sender_id, receiver_id, content, type, mysqlTime]
   );
-} catch (colErr: any) {
-  // Fallback: column doesn't exist yet, insert without msg_type
-  if (colErr?.code === 'ER_BAD_FIELD_ERROR') {
-    [result] = await db.execute<ResultSetHeader>(
-      'INSERT INTO chat (sender_id, receiver_id, content, created_at, seen) VALUES (?, ?, ?, ?, FALSE)',
-      [sender_id, receiver_id, content, mysqlTime]
-    );
-  } else {
-    throw colErr;
-  }
-}
+} catch {}
+
 
 
       const insertedId = (result as ResultSetHeader).insertId;

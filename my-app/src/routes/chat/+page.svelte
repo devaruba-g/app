@@ -295,18 +295,9 @@ async function loadMessages(userId: string) {
       credentials: "include",
     });
     const result = await response.json();
-    
-    // SvelteKit wraps action results - extract the actual data
-    let actionData;
-    if (result.type === 'success' && result.data) {
-      const parsed = JSON.parse(result.data);
-      actionData = Array.isArray(parsed) ? parsed[0] : parsed;
-    } else {
-      actionData = result;
-    }
 
-    if (actionData?.messages && Array.isArray(actionData.messages) && select && select.id === userId) {
-      const loadedMessages: Mess[] = actionData.messages.map((msg: any) => ({
+    if (result.messages && select && select.id === userId) {
+      const loadedMessages: Mess[] = result.messages.map((msg: any) => ({
         ...msg,
         fromSelf: msg.sender_id === data.user.id,
         created_at: parseToDate(msg.created_at),
@@ -341,10 +332,9 @@ async function loadMessages(userId: string) {
 
 
 async function message() {
-  if (!input.trim() && !selectedImage) return; // nothing to send
-  if (!select) return; // no user selected
+  if (!input.trim() && !selectedImage) return; 
+  if (!select) return;
 
-  // Prepare message type and content
   let msgType: "text" | "image" = "text";
   let messageContent: string = input;
 
@@ -352,18 +342,15 @@ async function message() {
   formData.append("receiver_id", select.id);
 
   if (selectedImage && imagePreview) {
-    // Sending an image
     msgType = "image";
     messageContent = imagePreview;
     formData.append("content", imagePreview);
     formData.append("type", "image");
   } else {
-    // Sending text
     formData.append("content", input);
     formData.append("type", "text");
   }
 
-  // Optimistic update: add message to UI immediately
   const newMessage: Mess = {
     id: Date.now(),
     sender_id: data.user.id,
@@ -376,57 +363,28 @@ async function message() {
   };
 
   mes = [...mes, newMessage];
-  messagesStore.update(($messages) => [...$messages, newMessage]);
 
-  // Clear input & image
+
   input = "";
   selectedImage = null;
   imagePreview = null;
 
   try {
-    // Correct fetch URL for page action
-    const response = await fetch("/chat?/sendMessage", {
+    const response = await fetch("?/sendMessage", {
       method: "POST",
       body: formData,
       credentials: "include",
     });
-
-    if (!response.ok) {
-      console.error("Network error sending message:", response.status, await response.text());
-      toast.error("Network error sending message: " + (await response.text() || "Unknown error"));
-      return;
-    }
-    
     const result = await response.json();
-    console.log("Send message result:", result);
-    
-    // SvelteKit wraps action results - extract the actual data
-    let actionData;
-    if (result.type === 'success' && result.data) {
-      const parsed = JSON.parse(result.data);
-      actionData = Array.isArray(parsed) ? parsed[0] : parsed;
-    } else {
-      actionData = result;
-    }
-    
-    if (!actionData?.success) {
-      console.error("Failed to send message:", actionData.message);
-      toast.error("Failed to send message: " + (actionData.message || "Unknown error"));
-      return;
-    }
+    if (!result.success) console.error("Failed to send message:", result.message);
 
-    // Optionally reload messages from server to sync
-    if (select?.id) {
-      await loadMessages(select.id);
-    }
-
+    if (select?.id) await loadMessages(select.id);
   } catch (error) {
     console.error("Error sending message:", error);
-    toast.error("Error sending message");
   }
 }
 
-function handleImageUpload(e: Event) {
+ function handleImageUpload(e: Event) {
   const target = e.target as HTMLInputElement;
   const file = target.files?.[0];
   if (!file || !select) return;

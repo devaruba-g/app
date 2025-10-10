@@ -27,7 +27,6 @@ export const GET: RequestHandler = async ({ request, locals }) => {
       safeEnqueue('retry: 3000\n\n');
       safeEnqueue(': connected\n\n');
 
-      // Poll database every 2 seconds for new messages
       pollInterval = setInterval(async () => {
         try {
           const events = await pollNewMessages(userId, lastPoll);
