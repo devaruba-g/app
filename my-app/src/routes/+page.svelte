@@ -70,6 +70,10 @@
               method="POST"
               action="?/signin"
               use:enhance
+<<<<<<< HEAD
+=======
+              
+>>>>>>> 3ccc60e (Update: fixed message reactivity issue on Vercel and improved chat history display)
               class="flex flex-col gap-4"
             >
               <Input
@@ -103,7 +107,11 @@
                 type="submit"
                 class="mt-2 bg-[#0073b1] hover:bg-blue-700 text-white"
               >
+<<<<<<< HEAD
                 Sign In
+=======
+              Sign In
+>>>>>>> 3ccc60e (Update: fixed message reactivity issue on Vercel and improved chat history display)
               </Button>
             </form>
           </Tabs.Content>
@@ -113,6 +121,10 @@
               method="POST"
               action="?/signup"
               use:enhance
+<<<<<<< HEAD
+=======
+             
+>>>>>>> 3ccc60e (Update: fixed message reactivity issue on Vercel and improved chat history display)
               class="flex flex-col gap-4"
             >
               <Input
