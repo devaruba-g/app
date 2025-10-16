@@ -361,11 +361,23 @@
               });
               console.log(`[POLLING] Before add - mes length: ${mes.length}`);
               
-              // Add new messages (only from other user)
-              mes = [...mes, ...safeNewMessages];
-              allMessages = [...allMessages, ...safeNewMessages];
+              // FINAL ABSOLUTE CHECK: Remove any that exist in mes or allMessages
+              const finalMesIds = new Set(mes.map(m => m.id));
+              const finalAllIds = new Set(allMessages.map(m => m.id));
+              const absolutelySafeMessages = safeNewMessages.filter(msg => 
+                !finalMesIds.has(msg.id) && !finalAllIds.has(msg.id)
+              );
               
-              console.log(`[POLLING] After add - mes length: ${mes.length}`);
+              if (absolutelySafeMessages.length !== safeNewMessages.length) {
+                console.error(`[POLLING FINAL BLOCK] Prevented ${safeNewMessages.length - absolutelySafeMessages.length} duplicates!`);
+              }
+              
+              if (absolutelySafeMessages.length > 0) {
+                // Add new messages (only from other user)
+                mes = [...mes, ...absolutelySafeMessages];
+                allMessages = [...allMessages, ...absolutelySafeMessages];
+                console.log(`[POLLING] After add - mes length: ${mes.length}`);
+              }
             }
           }
           
@@ -520,17 +532,33 @@
                     sequence: mes[messageIndex].sequence
                   };
                   
-                  // Replace the message in a new array
-                  const newMes = [...mes];
-                  newMes[messageIndex] = updatedMessage;
-                  mes = newMes;
-                  
-                  // Update allMessages too
-                  const allMessageIndex = allMessages.findIndex(m => m.id === tempId);
-                  if (allMessageIndex !== -1) {
-                    const newAllMessages = [...allMessages];
-                    newAllMessages[allMessageIndex] = updatedMessage;
-                    allMessages = newAllMessages;
+                  // FINAL CHECK before replacing: Ensure no duplicate with real ID
+                  const duplicateCheck = mes.filter(m => m.id === payload.id);
+                  if (duplicateCheck.length > 0) {
+                    console.error(`[UPDATE ERROR] Real ID ${payload.id} already exists ${duplicateCheck.length} times!`);
+                    // Just remove the temp message
+                    mes = mes.filter(m => m.id !== tempId);
+                    allMessages = allMessages.filter(m => m.id !== tempId);
+                  } else {
+                    // Replace the message in a new array
+                    const newMes = [...mes];
+                    newMes[messageIndex] = updatedMessage;
+                    mes = newMes;
+                    
+                    // Update allMessages too
+                    const allMessageIndex = allMessages.findIndex(m => m.id === tempId);
+                    if (allMessageIndex !== -1) {
+                      // Check allMessages doesn't have real ID either
+                      const allHasRealId = allMessages.some(m => m.id === payload.id);
+                      if (!allHasRealId) {
+                        const newAllMessages = [...allMessages];
+                        newAllMessages[allMessageIndex] = updatedMessage;
+                        allMessages = newAllMessages;
+                      } else {
+                        console.error(`[UPDATE ERROR] Real ID ${payload.id} already in allMessages!`);
+                        allMessages = allMessages.filter(m => m.id !== tempId);
+                      }
+                    }
                   }
                   
                   console.log(`[SUCCESS SSE] Updated message from temp ID ${tempId} to real ID ${payload.id}`);
@@ -619,6 +647,15 @@
           console.log(`[ADD SSE] Adding new message ID ${payload.id} from other user`);
           console.log(`[ADD SSE] Sender: ${payload.sender_id}, Content: "${payload.content}"`);
           console.log(`[ADD SSE] Before add - mes length: ${mes.length}`);
+          
+          // TRIPLE CHECK: Absolutely ensure not duplicate
+          const existsInMes = mes.some(m => m.id === payload.id);
+          const existsInAll = allMessages.some(m => m.id === payload.id);
+          
+          if (existsInMes || existsInAll) {
+            console.error(`[ADD SSE BLOCKED] ID ${payload.id} already exists! mes=${existsInMes}, all=${existsInAll}`);
+            return;
+          }
           
           // Add message - sorting will be handled by uniqueMessages derived state
           mes = [...mes, newMessage];
@@ -873,9 +910,16 @@
     console.log(`[SEND] Content: "${messageContent}"`);
     console.log(`[SEND] Receiver: ${receiverId}`);
     console.log(`[SEND] Sequence: ${currentSequence}, Timestamp: ${currentClientTimestamp}`);
-    mes = [...mes, optimisticMessage];
-    allMessages = [...allMessages, optimisticMessage];
-    console.log(`[SEND] mes array now has ${mes.length} messages`);
+    
+    // ABSOLUTE CHECK: Never add if ID already exists
+    const tempIdExists = mes.some(m => m.id === tempId);
+    if (!tempIdExists) {
+      mes = [...mes, optimisticMessage];
+      allMessages = [...allMessages, optimisticMessage];
+      console.log(`[SEND] mes array now has ${mes.length} messages`);
+    } else {
+      console.error(`[SEND ERROR] Temp ID ${tempId} already exists! Not adding.`);
+    }
 
     try {
       const formData = new FormData();
@@ -1098,8 +1142,17 @@
     });
     
     // Add optimistic message to UI
-    mes = [...mes, optimisticMessage];
-    allMessages = [...allMessages, optimisticMessage];
+    console.log(`[IMAGE UPLOAD] Adding optimistic message with temp ID ${tempId}`);
+    
+    // ABSOLUTE CHECK: Never add if ID already exists
+    const tempIdExists = mes.some(m => m.id === tempId);
+    if (!tempIdExists) {
+      mes = [...mes, optimisticMessage];
+      allMessages = [...allMessages, optimisticMessage];
+      console.log(`[IMAGE UPLOAD] mes array now has ${mes.length} messages`);
+    } else {
+      console.error(`[IMAGE UPLOAD ERROR] Temp ID ${tempId} already exists! Not adding.`);
+    }
 
     try {
       const formData = new FormData();
