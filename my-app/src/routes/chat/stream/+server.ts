@@ -1,7 +1,13 @@
 import type { RequestHandler } from '@sveltejs/kit';
 import { subscribe, toSseChunk } from '$lib/realtime';
 
-export const GET: RequestHandler = async ({ request }) => {
+export const GET: RequestHandler = async ({ request, locals }) => {
+  const userId = locals.user?.id;
+  
+  if (!userId) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
@@ -23,7 +29,8 @@ export const GET: RequestHandler = async ({ request }) => {
       safeEnqueue('retry: 3000\n\n');
       safeEnqueue(': connected\n\n');
 
-      unsubscribe = subscribe((event) => {
+      // Subscribe with userId so we can filter out our own messages
+      unsubscribe = subscribe(userId, (event) => {
         safeEnqueue(toSseChunk(event));
       });
 

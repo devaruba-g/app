@@ -49,7 +49,8 @@ export const POST: RequestHandler = async ({ request, locals }) => {
         content,
         message_type: 'text',
         created_at: message.created_at
-      }
+      },
+      excludeUserId: sender_id // Don't send back to sender
     });
 
     return new Response(

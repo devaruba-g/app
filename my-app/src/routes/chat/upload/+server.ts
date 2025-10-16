@@ -70,7 +70,8 @@ export const POST: RequestHandler = async ({ request, locals }) => {
         message_type: 'image',
         file_path: base64DataUrl,
         created_at: message.created_at
-      }
+      },
+      excludeUserId: sender_id // Don't send back to sender
     });
 
     return new Response(JSON.stringify({

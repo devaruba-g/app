@@ -33,8 +33,7 @@
     file_path?: string;
     created_at: Date;
     fromSelf: boolean;
-    sequence?: number;
-    clientTimestamp?: number; // Client-side timestamp for ordering
+    clientTimestamp?: number; // For optimistic messages
   }
   let users = $state<User[]>(data.users || []);
   let select = $state<User | null>(null);
@@ -53,13 +52,7 @@
   let allUsers = $state<User[]>([]);
   let showImageModal = $state(false);
   let modalImageSrc = $state<string | null>(null);
-  let pendingMessageIds = $state<Set<number>>(new Set());
-  let pendingMessagesMap = $state<Map<number, {content: string, receiver_id: string, timestamp: number, sequence: number}>>(new Map());
-  let messageSequence = 0;
-  let clientSequence = 0; // Global sequence counter for all messages
   let processedMessageIds = $state<Set<number>>(new Set());
-  let verifyMessagesTimeout: ReturnType<typeof setTimeout> | null = null;
-  let messageOrderMap = $state<Map<number, number>>(new Map());
   let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent
   let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp
   let lastPolledMessageId = $state<number>(0); // Track last message ID from polling to avoid redundant checks 
@@ -73,49 +66,18 @@
       if (!seen.has(msg.id)) {
         seen.add(msg.id);
         unique.push(msg);
-      } else {
-        console.warn(`[DUPLICATE DETECTED] Filtering out duplicate message ID: ${msg.id}`);
-        console.warn(`[DUPLICATE DETECTED] Content: "${msg.content}"`);
-        console.warn(`[DUPLICATE DETECTED] Sender: ${msg.sender_id}`);
-        console.warn(`[DUPLICATE DETECTED] fromSelf: ${msg.fromSelf}`);
-        console.warn(`[DUPLICATE DETECTED] Total messages in mes: ${mes.length}`);
-        console.warn(`[DUPLICATE DETECTED] Unique messages so far: ${unique.length}`);
       }
     }
     
-    // Sort messages with intelligent ordering
+    // Sort messages by ID
+    // Positive IDs (from database) are chronological due to auto-increment
+    // Negative IDs (optimistic) go to the end
     return unique.sort((a, b) => {
-      // For messages with client timestamp (our sent messages), use it
-      const hasClientTimestampA = a.clientTimestamp !== undefined;
-      const hasClientTimestampB = b.clientTimestamp !== undefined;
-      
-      // If both have client timestamps (both are our messages), sort by client time + sequence
-      if (hasClientTimestampA && hasClientTimestampB) {
-        if (a.clientTimestamp! !== b.clientTimestamp!) {
-          return a.clientTimestamp! - b.clientTimestamp!;
-        }
-        if (a.sequence !== undefined && b.sequence !== undefined) {
-          return a.sequence - b.sequence;
-        }
-        return a.id - b.id;
-      }
-      
-      // If neither has client timestamp (both received), use database ID (auto-increment = chronological)
-      if (!hasClientTimestampA && !hasClientTimestampB) {
-        return a.id - b.id;
-      }
-      
-      // Mixed case: compare server timestamps
-      const timeA = a.clientTimestamp || new Date(a.created_at).getTime();
-      const timeB = b.clientTimestamp || new Date(b.created_at).getTime();
-      
-      // If timestamps are very close (within 100ms), use ID for stability
-      const timeDiff = Math.abs(timeA - timeB);
-      if (timeDiff < 100) {
-        return a.id - b.id;
-      }
-      
-      return timeA - timeB;
+      // If one is optimistic (negative) and one is real (positive), real comes first
+      if (a.id < 0 && b.id > 0) return 1;
+      if (a.id > 0 && b.id < 0) return -1;
+      // Otherwise sort by ID
+      return a.id - b.id;
     });
   });
 
@@ -129,20 +91,6 @@
     showImageModal = false;
   }
 
-  function scheduleMessageVerification() {
-
-    if (verifyMessagesTimeout) {
-      clearTimeout(verifyMessagesTimeout);
-    }
-    
-
-    verifyMessagesTimeout = setTimeout(() => {
-      if (select?.id && pendingMessagesMap.size > 0) {
-        console.log("Some messages still pending, verifying...");
-        loadMessages(select.id);
-      }
-    }, 5000);
-  }
 
   function getChatUsersWithHistory(): User[] {
     const usersWithMessages = new Set<string>();
@@ -324,65 +272,34 @@
 
           // Find new messages that we don't have yet
           const currentIds = new Set(mes.map(m => m.id));
-          const allMessagesIds = new Set(allMessages.map(m => m.id));
           
           const newMessages = serverMessages.filter(msg => {
-            // Must pass ALL these checks:
-            const notInMes = !currentIds.has(msg.id);
-            const notInAllMessages = !allMessagesIds.has(msg.id);
-            const isRealMessage = msg.id > 0;
-            const isNewerThanLastPoll = msg.id > lastPolledMessageId;
-            const notFromMe = msg.sender_id !== myId;
-            const notProcessed = !processedMessageIds.has(msg.id) || msg.sender_id !== myId;
+            // Skip if already in our list
+            if (currentIds.has(msg.id)) return false;
             
-            const shouldAdd = notInMes && notInAllMessages && isRealMessage && isNewerThanLastPoll && notFromMe;
+            // Skip if it's a real message (positive ID) and we already processed it
+            if (msg.id > 0 && processedMessageIds.has(msg.id)) return false;
             
-            if (!shouldAdd && msg.sender_id !== myId) {
-              console.log(`[POLLING SKIP] Message ID ${msg.id}: notInMes=${notInMes}, notInAll=${notInAllMessages}, newer=${isNewerThanLastPoll}`);
-            }
+            // Skip if newer than last poll (avoid re-processing)
+            if (msg.id <= lastPolledMessageId) return false;
             
-            return shouldAdd;
+            return true;
           });
 
           if (newMessages.length > 0) {
-            console.log(`[POLLING] Found ${newMessages.length} new messages from other user`);
-            
-            // DOUBLE CHECK: Filter out any that somehow already exist
-            const currentMesIds = new Set(mes.map(m => m.id));
-            const safeNewMessages = newMessages.filter(msg => !currentMesIds.has(msg.id));
-            
-            if (safeNewMessages.length !== newMessages.length) {
-              console.warn(`[POLLING] Filtered out ${newMessages.length - safeNewMessages.length} messages that already exist`);
-            }
-            
-            if (safeNewMessages.length > 0) {
-              safeNewMessages.forEach(msg => {
-                console.log(`[POLLING] - ID ${msg.id}, Sender: ${msg.sender_id}, Content: "${msg.content}"`);
-              });
-              console.log(`[POLLING] Before add - mes length: ${mes.length}`);
-              
-              // FINAL ABSOLUTE CHECK: Remove any that exist in mes or allMessages
-              const finalMesIds = new Set(mes.map(m => m.id));
-              const finalAllIds = new Set(allMessages.map(m => m.id));
-              const absolutelySafeMessages = safeNewMessages.filter(msg => 
-                !finalMesIds.has(msg.id) && !finalAllIds.has(msg.id)
-              );
-              
-              if (absolutelySafeMessages.length !== safeNewMessages.length) {
-                console.error(`[POLLING FINAL BLOCK] Prevented ${safeNewMessages.length - absolutelySafeMessages.length} duplicates!`);
+            // Add new messages and mark as processed
+            newMessages.forEach(msg => {
+              processedMessageIds.add(msg.id);
+              if (msg.sender_id === myId) {
+                sentMessageIds.add(msg.id);
               }
-              
-              if (absolutelySafeMessages.length > 0) {
-                // Add new messages (only from other user)
-                mes = [...mes, ...absolutelySafeMessages];
-                allMessages = [...allMessages, ...absolutelySafeMessages];
-                console.log(`[POLLING] After add - mes length: ${mes.length}`);
-              }
-            }
+            });
+            
+            mes = [...mes, ...newMessages];
+            allMessages = [...allMessages, ...newMessages];
           }
           
-          // Update lastPolledMessageId for ALL messages (including our own)
-          // This prevents re-checking messages we've already seen
+          // Update lastPolledMessageId
           if (serverMessages.length > 0) {
             const maxId = Math.max(...serverMessages.filter(m => m.id > 0).map(m => m.id));
             if (maxId > lastPolledMessageId) {
@@ -463,170 +380,53 @@
     };
 
     sseSource.onmessage = (ev: MessageEvent) => {
-      console.log("SSE message received:", ev.data);
       try {
         const payload = JSON.parse(ev.data);
-        console.log("Parsed SSE payload:", payload);
         
-        // VERCEL FIX: Check if we just processed this exact message (within 1 second)
+        // Server now filters out our own messages, so we should only receive messages from others
+        // This simplifies the logic significantly
+        
+        // Prevent duplicate SSE processing
         const now = Date.now();
         const lastProcessed = recentlyProcessedSSE.get(payload.id);
-        if (lastProcessed && (now - lastProcessed) < 1000) {
-          console.log(`[BLOCKED] Duplicate SSE message ${payload.id} within 1 second`);
+        if (lastProcessed && (now - lastProcessed) < 2000) {
+          console.log(`[SSE SKIP] Duplicate message ${payload.id} within 2 seconds`);
           return;
         }
         recentlyProcessedSSE.set(payload.id, now);
         
-        // Clean up old entries (older than 5 seconds)
+        // Clean up old entries
         for (const [id, timestamp] of recentlyProcessedSSE.entries()) {
           if (now - timestamp > 5000) {
             recentlyProcessedSSE.delete(id);
           }
         }
 
-        // CRITICAL FIRST CHECK: If this message was sent by me, NEVER process it
-        // We already have the optimistic update in place
-        if (payload.sender_id === myId) {
-          console.log(`[BLOCKED SSE] Message ID ${payload.id} sent by me - ignoring from SSE`);
-          console.log(`[BLOCKED SSE] Content: "${payload.content}"`);
-          
-          // Mark this ID as sent by us to prevent any future processing
-          sentMessageIds.add(payload.id);
-          processedMessageIds.add(payload.id);
-          
-          console.log(`[TRACKING] sentMessageIds now has ${sentMessageIds.size} IDs`);
-          console.log(`[TRACKING] Current mes array has ${mes.length} messages`);
-          
-          // Only update if we're in the active chat with the receiver
-          if (select && payload.receiver_id === select.id) {
-            // Find the pending message by content and receiver
-            const pendingEntry = Array.from(pendingMessagesMap.entries()).find(
-              ([_, data]) => data.content === payload.content && data.receiver_id === payload.receiver_id
-            );
-            
-            if (pendingEntry) {
-              const [tempId, msgData] = pendingEntry;
-              console.log(`[UPDATE SSE] Found pending message with temp ID ${tempId}`);
-              console.log(`[UPDATE SSE] Replacing temp ID ${tempId} with real ID ${payload.id}`);
-              
-              // Find the optimistic message in the array
-              const messageIndex = mes.findIndex(m => m.id === tempId);
-              console.log(`[UPDATE SSE] Message index in array: ${messageIndex}`);
-              
-              if (messageIndex !== -1) {
-                // CRITICAL: Check if real ID already exists before updating
-                const realIdExists = mes.some(m => m.id === payload.id);
-                if (realIdExists) {
-                  console.error(`[ERROR SSE] Real ID ${payload.id} already exists! Removing temp message instead.`);
-                  mes = mes.filter(m => m.id !== tempId);
-                  allMessages = allMessages.filter(m => m.id !== tempId);
-                } else {
-                  // Create a new message object with the real ID, preserving client timestamp and sequence
-                  const updatedMessage = {
-                    ...mes[messageIndex],
-                    id: payload.id,
-                    file_path: payload.file_path || mes[messageIndex].file_path,
-                    created_at: payload.created_at ? new Date(payload.created_at) : mes[messageIndex].created_at,
-                    // Keep client timestamp and sequence for proper ordering
-                    clientTimestamp: mes[messageIndex].clientTimestamp,
-                    sequence: mes[messageIndex].sequence
-                  };
-                  
-                  // FINAL CHECK before replacing: Ensure no duplicate with real ID
-                  const duplicateCheck = mes.filter(m => m.id === payload.id);
-                  if (duplicateCheck.length > 0) {
-                    console.error(`[UPDATE ERROR] Real ID ${payload.id} already exists ${duplicateCheck.length} times!`);
-                    // Just remove the temp message
-                    mes = mes.filter(m => m.id !== tempId);
-                    allMessages = allMessages.filter(m => m.id !== tempId);
-                  } else {
-                    // Replace the message in a new array
-                    const newMes = [...mes];
-                    newMes[messageIndex] = updatedMessage;
-                    mes = newMes;
-                    
-                    // Update allMessages too
-                    const allMessageIndex = allMessages.findIndex(m => m.id === tempId);
-                    if (allMessageIndex !== -1) {
-                      // Check allMessages doesn't have real ID either
-                      const allHasRealId = allMessages.some(m => m.id === payload.id);
-                      if (!allHasRealId) {
-                        const newAllMessages = [...allMessages];
-                        newAllMessages[allMessageIndex] = updatedMessage;
-                        allMessages = newAllMessages;
-                      } else {
-                        console.error(`[UPDATE ERROR] Real ID ${payload.id} already in allMessages!`);
-                        allMessages = allMessages.filter(m => m.id !== tempId);
-                      }
-                    }
-                  }
-                  
-                  console.log(`[SUCCESS SSE] Updated message from temp ID ${tempId} to real ID ${payload.id}`);
-                }
-              }
-              
-              // Clean up tracking
-              pendingMessageIds.delete(tempId);
-              pendingMessagesMap.delete(tempId);
-            } else {
-              console.warn(`[WARNING SSE] No pending message found for ID ${payload.id}`);
-              console.warn(`[WARNING SSE] Content: "${payload.content}"`);
-              console.warn(`[WARNING SSE] Receiver: ${payload.receiver_id}`);
-              console.warn(`[WARNING SSE] Current pending map size: ${pendingMessagesMap.size}`);
-              console.warn(`[WARNING SSE] Current mes length: ${mes.length}`);
-              
-              // Check if this message already exists in mes
-              const existsInMes = mes.some(m => m.id === payload.id);
-              if (existsInMes) {
-                console.warn(`[WARNING SSE] Message ID ${payload.id} already exists in mes array!`);
-              }
-            }
-          }
-          
-          return; // ALWAYS return here - never add our own messages from SSE
-        }
-
         // Handle notifications if no chat is selected
         if (!select) {
-          console.log("No user selected, handling as notification");
           handleNotificationMessage(payload);
           return;
         }
 
-        // Check if this message is for the active chat (only messages FROM other user TO me)
+        // Check if this message is for the active chat
         const isForActiveChat =
           (payload.sender_id === select.id && payload.receiver_id === myId);
 
         if (isForActiveChat) {
-          console.log("[RECEIVE] Message for active chat from other user");
-          
-          // Triple safety check - this should never be our own message
-          if (payload.sender_id === myId) {
-            console.error("[ERROR] Our own message passed first check - blocking");
-            return;
-          }
-          
-          if (sentMessageIds.has(payload.id)) {
-            console.log("[BLOCKED] Message ID in sent list");
-            return;
-          }
-          
           // Prevent duplicate processing
           if (processedMessageIds.has(payload.id)) {
-            console.log("[BLOCKED] Message already processed");
             return;
           }
           
           // Check if message already exists
           if (mes.some((m) => m.id === payload.id)) {
-            console.log("[BLOCKED] Message already in list");
             return;
           }
           
           processedMessageIds.add(payload.id);
           
           const newMessage: Mess = {
-            id: payload.id ?? Date.now(),
+            id: payload.id,
             sender_id: payload.sender_id,
             receiver_id: payload.receiver_id,
             content: payload.content,
@@ -634,40 +434,13 @@
             file_path: payload.file_path,
             created_at: payload.created_at ? new Date(payload.created_at) : new Date(),
             fromSelf: false,
-            // DON'T set clientTimestamp for received messages - let them sort by database ID
           };
-
-          // FINAL CHECK: Make absolutely sure this message doesn't already exist
-          const alreadyExists = mes.some(m => m.id === payload.id);
-          if (alreadyExists) {
-            console.warn(`[BLOCKED SSE] Message ID ${payload.id} already exists in mes array!`);
-            return;
-          }
           
-          console.log(`[ADD SSE] Adding new message ID ${payload.id} from other user`);
-          console.log(`[ADD SSE] Sender: ${payload.sender_id}, Content: "${payload.content}"`);
-          console.log(`[ADD SSE] Before add - mes length: ${mes.length}`);
-          
-          // TRIPLE CHECK: Absolutely ensure not duplicate
-          const existsInMes = mes.some(m => m.id === payload.id);
-          const existsInAll = allMessages.some(m => m.id === payload.id);
-          
-          if (existsInMes || existsInAll) {
-            console.error(`[ADD SSE BLOCKED] ID ${payload.id} already exists! mes=${existsInMes}, all=${existsInAll}`);
-            return;
-          }
-          
-          // Add message - sorting will be handled by uniqueMessages derived state
           mes = [...mes, newMessage];
           allMessages = [...allMessages, newMessage];
           
-          console.log(`[ADD SSE] After add - mes length: ${mes.length}`);
-          
           markMessageAsSeenImmediately(payload.id, payload.sender_id);
         } else {
-          console.log(
-            "Message is not for active chat, handling as notification",
-          );
           handleNotificationMessage(payload);
         }
       } catch (error) {
@@ -759,11 +532,8 @@
     currentSelectedId = selectedUser.id;
     mes = [];
     processedMessageIds.clear(); 
-    pendingMessageIds.clear(); 
-    pendingMessagesMap.clear();
     sentMessageIds.clear(); // Clear sent message tracking
     lastPolledMessageId = 0; // Reset polling tracker
-    messageSequence = 0; 
     loadingMessages = true;
 
     if (
@@ -814,55 +584,22 @@
           fromSelf: msg.sender_id === data.user.id,
         }));
 
-
-        const serverMessageMap = new Map<number, Mess>(serverMessages.map((m) => [m.id, m]));
-        
-  
+        // Track all server messages
         serverMessages.forEach((msg: any) => {
           processedMessageIds.add(msg.id);
-          // Track our own messages to prevent SSE duplicates
           if (msg.sender_id === myId) {
             sentMessageIds.add(msg.id);
           }
         });
         
-
-        // Merge server messages with pending optimistic messages
-        const finalMessages: Mess[] = [];
-        const addedIds = new Set<number>();
+        // Keep any optimistic messages (negative IDs) and add server messages
+        const optimisticMessages = mes.filter(m => m.id < 0);
+        mes = [...optimisticMessages, ...serverMessages];
         
-        // First, add all pending optimistic messages (keep them in order)
-        for (const msg of mes) {
-          if (pendingMessageIds.has(msg.id)) {
-            finalMessages.push(msg);
-            addedIds.add(msg.id);
-          }
-        }
-        
-        // Then add all server messages that aren't duplicates
-        for (const serverMsg of serverMessages) {
-          if (!addedIds.has(serverMsg.id)) {
-            finalMessages.push(serverMsg);
-            addedIds.add(serverMsg.id);
-          }
-        }
-        
-        // Sort by ID (database auto-increment ensures correct order)
-        // Negative IDs (optimistic) will appear first, then positive IDs in order
-        finalMessages.sort((a, b) => {
-          // Keep pending messages at the end (they have negative IDs)
-          if (a.id < 0 && b.id > 0) return 1;
-          if (a.id > 0 && b.id < 0) return -1;
-          return a.id - b.id;
-        });
-        
-        mes = finalMessages;
-        
-        // CRITICAL: Initialize lastPolledMessageId to prevent re-adding old messages
-        if (finalMessages.length > 0) {
-          const maxId = Math.max(...finalMessages.filter(m => m.id > 0).map(m => m.id));
+        // Initialize lastPolledMessageId to prevent re-adding old messages
+        if (serverMessages.length > 0) {
+          const maxId = Math.max(...serverMessages.filter(m => m.id > 0).map(m => m.id));
           lastPolledMessageId = maxId;
-          console.log(`[LOAD] Initialized lastPolledMessageId to ${maxId}`);
         }
       }
     } catch (error) {
@@ -881,7 +618,6 @@
     // Create optimistic message with temporary negative ID
     const tempId = -(Date.now());
     const currentClientTimestamp = Date.now();
-    const currentSequence = clientSequence++; // Increment global sequence
     
     const optimisticMessage: Mess = {
       id: tempId,
@@ -892,34 +628,11 @@
       created_at: new Date(),
       fromSelf: true,
       clientTimestamp: currentClientTimestamp,
-      sequence: currentSequence,
     };
     
-    // VERCEL FIX: Pre-mark this message as sent to block any SSE
-    // This prevents race conditions in serverless environments
-    pendingMessageIds.add(tempId);
-    pendingMessagesMap.set(tempId, { 
-      content: messageContent, 
-      receiver_id: receiverId,
-      timestamp: currentClientTimestamp,
-      sequence: currentSequence
-    });
-    
     // Add optimistic message to UI immediately
-    console.log(`[SEND] Adding optimistic message with temp ID ${tempId}`);
-    console.log(`[SEND] Content: "${messageContent}"`);
-    console.log(`[SEND] Receiver: ${receiverId}`);
-    console.log(`[SEND] Sequence: ${currentSequence}, Timestamp: ${currentClientTimestamp}`);
-    
-    // ABSOLUTE CHECK: Never add if ID already exists
-    const tempIdExists = mes.some(m => m.id === tempId);
-    if (!tempIdExists) {
-      mes = [...mes, optimisticMessage];
-      allMessages = [...allMessages, optimisticMessage];
-      console.log(`[SEND] mes array now has ${mes.length} messages`);
-    } else {
-      console.error(`[SEND ERROR] Temp ID ${tempId} already exists! Not adding.`);
-    }
+    mes = [...mes, optimisticMessage];
+    allMessages = [...allMessages, optimisticMessage];
 
     try {
       const formData = new FormData();
@@ -933,30 +646,33 @@
       const result = await response.json();
       
       if (result.success) {
-        // Message sent successfully - SSE will handle updating the temp ID to real ID
-        console.log(`[SEND SUCCESS] Message sent with real ID ${result.id}`);
-        console.log(`[SEND SUCCESS] Temp ID was ${tempId}`);
-        
-        // VERCEL FIX: Immediately mark the real ID as sent to prevent SSE duplicates
-        sentMessageIds.add(result.id);
+        // Message sent successfully
+        // Mark this ID so we don't add it again from polling
         processedMessageIds.add(result.id);
-        console.log(`[SEND SUCCESS] Marked ID ${result.id} as sent`);
-        console.log(`[SEND SUCCESS] sentMessageIds size: ${sentMessageIds.size}`);
+        sentMessageIds.add(result.id);
+        
+        // Replace temp message with real one from server
+        // Polling will pick it up, or we can replace it now
+        setTimeout(() => {
+          // Remove temp message after a delay - polling will add the real one
+          mes = mes.filter(m => m.id !== tempId);
+          allMessages = allMessages.filter(m => m.id !== tempId);
+          // Trigger a refresh to get the real message
+          if (select && select.id === receiverId) {
+            loadMessages(receiverId);
+          }
+        }, 500);
       } else {
         console.error("Failed to send message", result.message);
         // Remove optimistic message on failure
         mes = mes.filter(m => m.id !== tempId);
         allMessages = allMessages.filter(m => m.id !== tempId);
-        pendingMessageIds.delete(tempId);
-        pendingMessagesMap.delete(tempId);
       }
     } catch (error) {
       console.error("Error saving message:", error);
       // Remove optimistic message on error
       mes = mes.filter(m => m.id !== tempId);
       allMessages = allMessages.filter(m => m.id !== tempId);
-      pendingMessageIds.delete(tempId);
-      pendingMessagesMap.delete(tempId);
     }
   }
 
@@ -1099,12 +815,7 @@
   }
 
   async function uploadImage() {
-    console.log("uploadImage called");
-    console.log("selectedFile:", selectedFile);
-    console.log("select:", select);
-
     if (!selectedFile || !select) {
-      console.log("Missing selectedFile or select, returning");
       return;
     }
 
@@ -1112,12 +823,10 @@
     const fileToUpload = selectedFile;
     const receiverId = select.id;
     selectedFile = null; // Clear immediately
-    console.log("Starting upload...");
 
     // Create optimistic message
     const tempId = -(Date.now());
     const currentClientTimestamp = Date.now();
-    const currentSequence = clientSequence++; // Increment global sequence
     
     const optimisticMessage: Mess = {
       id: tempId,
@@ -1129,69 +838,49 @@
       created_at: new Date(),
       fromSelf: true,
       clientTimestamp: currentClientTimestamp,
-      sequence: currentSequence,
     };
     
-    // Track pending message
-    pendingMessageIds.add(tempId);
-    pendingMessagesMap.set(tempId, { 
-      content: fileToUpload.name, 
-      receiver_id: receiverId,
-      timestamp: currentClientTimestamp,
-      sequence: currentSequence
-    });
-    
     // Add optimistic message to UI
-    console.log(`[IMAGE UPLOAD] Adding optimistic message with temp ID ${tempId}`);
-    
-    // ABSOLUTE CHECK: Never add if ID already exists
-    const tempIdExists = mes.some(m => m.id === tempId);
-    if (!tempIdExists) {
-      mes = [...mes, optimisticMessage];
-      allMessages = [...allMessages, optimisticMessage];
-      console.log(`[IMAGE UPLOAD] mes array now has ${mes.length} messages`);
-    } else {
-      console.error(`[IMAGE UPLOAD ERROR] Temp ID ${tempId} already exists! Not adding.`);
-    }
+    mes = [...mes, optimisticMessage];
+    allMessages = [...allMessages, optimisticMessage];
 
     try {
       const formData = new FormData();
       formData.append("image", fileToUpload);
       formData.append("receiver_id", receiverId);
 
-      console.log("Sending request to /chat/upload");
       const response = await fetch("/chat/upload", {
         method: "POST",
         body: formData,
         credentials: "include",
       });
 
-      console.log("Response status:", response.status);
       const result = await response.json();
-      console.log("Upload result:", result);
 
       if (result.success) {
-        console.log(`Image uploaded successfully with ID ${result.id}`);
-        
-        // VERCEL FIX: Immediately mark the real ID as sent to prevent SSE duplicates
-        sentMessageIds.add(result.id);
+        // Mark this ID so we don't add it again from polling
         processedMessageIds.add(result.id);
-        // SSE will handle updating the temp ID to real ID with actual base64 data
+        sentMessageIds.add(result.id);
+        
+        // Replace temp message with real one
+        setTimeout(() => {
+          mes = mes.filter(m => m.id !== tempId);
+          allMessages = allMessages.filter(m => m.id !== tempId);
+          if (select && select.id === receiverId) {
+            loadMessages(receiverId);
+          }
+        }, 500);
       } else {
         console.error("Failed to upload image:", result.error);
         // Remove optimistic message on failure
         mes = mes.filter(m => m.id !== tempId);
         allMessages = allMessages.filter(m => m.id !== tempId);
-        pendingMessageIds.delete(tempId);
-        pendingMessagesMap.delete(tempId);
       }
     } catch (error) {
       console.error("Error uploading image:", error);
       // Remove optimistic message on error
       mes = mes.filter(m => m.id !== tempId);
       allMessages = allMessages.filter(m => m.id !== tempId);
-      pendingMessageIds.delete(tempId);
-      pendingMessagesMap.delete(tempId);
     } finally {
       isUploading = false;
     }
