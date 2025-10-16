@@ -1,0 +1,38 @@
+{
+	"/": [
+		"src/routes/+page.server.ts"
+	],
+	"/chat": [
+		"src/routes/chat/+page.server.ts"
+	],
+	"/chat/heartbeat": [
+		"src/routes/chat/heartbeat/+server.ts"
+	],
+	"/chat/loadMessages": [
+		"src/routes/chat/loadMessages/+server.ts"
+	],
+	"/chat/markAsSeen": [
+		"src/routes/chat/markAsSeen/+server.ts"
+	],
+	"/chat/notifications": [
+		"src/routes/chat/notifications/+server.ts"
+	],
+	"/chat/online-users": [
+		"src/routes/chat/online-users/+server.ts"
+	],
+	"/chat/sendMessage": [
+		"src/routes/chat/sendMessage/+server.ts"
+	],
+	"/chat/stream": [
+		"src/routes/chat/stream/+server.ts"
+	],
+	"/chat/upload": [
+		"src/routes/chat/upload/+server.ts"
+	],
+	"/forgot-password": [
+		"src/routes/forgot-password/+page.server.ts"
+	],
+	"/reset-password": [
+		"src/routes/reset-password/+page.server.ts"
+	]
+}
