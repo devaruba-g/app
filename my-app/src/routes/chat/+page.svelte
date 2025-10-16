@@ -324,12 +324,25 @@
 
           // Find new messages that we don't have yet
           const currentIds = new Set(mes.map(m => m.id));
-          const newMessages = serverMessages.filter(msg => 
-            !currentIds.has(msg.id) && 
-            msg.id > 0 && // Ignore optimistic messages
-            msg.id > lastPolledMessageId && // Only messages newer than last poll
-            msg.sender_id !== myId // CRITICAL: Don't add our own messages via polling!
-          );
+          const allMessagesIds = new Set(allMessages.map(m => m.id));
+          
+          const newMessages = serverMessages.filter(msg => {
+            // Must pass ALL these checks:
+            const notInMes = !currentIds.has(msg.id);
+            const notInAllMessages = !allMessagesIds.has(msg.id);
+            const isRealMessage = msg.id > 0;
+            const isNewerThanLastPoll = msg.id > lastPolledMessageId;
+            const notFromMe = msg.sender_id !== myId;
+            const notProcessed = !processedMessageIds.has(msg.id) || msg.sender_id !== myId;
+            
+            const shouldAdd = notInMes && notInAllMessages && isRealMessage && isNewerThanLastPoll && notFromMe;
+            
+            if (!shouldAdd && msg.sender_id !== myId) {
+              console.log(`[POLLING SKIP] Message ID ${msg.id}: notInMes=${notInMes}, notInAll=${notInAllMessages}, newer=${isNewerThanLastPoll}`);
+            }
+            
+            return shouldAdd;
+          });
 
           if (newMessages.length > 0) {
             console.log(`[POLLING] Found ${newMessages.length} new messages from other user`);
@@ -593,7 +606,7 @@
             file_path: payload.file_path,
             created_at: payload.created_at ? new Date(payload.created_at) : new Date(),
             fromSelf: false,
-            clientTimestamp: new Date(payload.created_at).getTime(),
+            // DON'T set clientTimestamp for received messages - let them sort by database ID
           };
 
           // FINAL CHECK: Make absolutely sure this message doesn't already exist
@@ -807,6 +820,13 @@
         });
         
         mes = finalMessages;
+        
+        // CRITICAL: Initialize lastPolledMessageId to prevent re-adding old messages
+        if (finalMessages.length > 0) {
+          const maxId = Math.max(...finalMessages.filter(m => m.id > 0).map(m => m.id));
+          lastPolledMessageId = maxId;
+          console.log(`[LOAD] Initialized lastPolledMessageId to ${maxId}`);
+        }
       }
     } catch (error) {
       console.error("Error loading messages:", error);
