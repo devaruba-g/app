@@ -60,7 +60,8 @@
   let processedMessageIds = $state<Set<number>>(new Set());
   let verifyMessagesTimeout: ReturnType<typeof setTimeout> | null = null;
   let messageOrderMap = $state<Map<number, number>>(new Map());
-  let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent 
+  let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent
+  let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp 
   
   // Derived state: unique messages sorted correctly
   let uniqueMessages = $derived.by(() => {
@@ -315,6 +316,22 @@
       try {
         const payload = JSON.parse(ev.data);
         console.log("Parsed SSE payload:", payload);
+        
+        // VERCEL FIX: Check if we just processed this exact message (within 1 second)
+        const now = Date.now();
+        const lastProcessed = recentlyProcessedSSE.get(payload.id);
+        if (lastProcessed && (now - lastProcessed) < 1000) {
+          console.log(`[BLOCKED] Duplicate SSE message ${payload.id} within 1 second`);
+          return;
+        }
+        recentlyProcessedSSE.set(payload.id, now);
+        
+        // Clean up old entries (older than 5 seconds)
+        for (const [id, timestamp] of recentlyProcessedSSE.entries()) {
+          if (now - timestamp > 5000) {
+            recentlyProcessedSSE.delete(id);
+          }
+        }
 
         // CRITICAL FIRST CHECK: If this message was sent by me, NEVER process it
         // We already have the optimistic update in place
@@ -658,7 +675,8 @@
       sequence: currentSequence,
     };
     
-    // Track pending message
+    // VERCEL FIX: Pre-mark this message as sent to block any SSE
+    // This prevents race conditions in serverless environments
     pendingMessageIds.add(tempId);
     pendingMessagesMap.set(tempId, { 
       content: messageContent, 
@@ -685,6 +703,10 @@
       if (result.success) {
         // Message sent successfully - SSE will handle updating the temp ID to real ID
         console.log(`Message sent successfully with ID ${result.id}`);
+        
+        // VERCEL FIX: Immediately mark the real ID as sent to prevent SSE duplicates
+        sentMessageIds.add(result.id);
+        processedMessageIds.add(result.id);
       } else {
         console.error("Failed to send message", result.message);
         // Remove optimistic message on failure
@@ -906,6 +928,10 @@
 
       if (result.success) {
         console.log(`Image uploaded successfully with ID ${result.id}`);
+        
+        // VERCEL FIX: Immediately mark the real ID as sent to prevent SSE duplicates
+        sentMessageIds.add(result.id);
+        processedMessageIds.add(result.id);
         // SSE will handle updating the temp ID to real ID with actual base64 data
       } else {
         console.error("Failed to upload image:", result.error);
