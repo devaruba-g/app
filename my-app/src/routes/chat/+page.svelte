@@ -61,7 +61,8 @@
   let verifyMessagesTimeout: ReturnType<typeof setTimeout> | null = null;
   let messageOrderMap = $state<Map<number, number>>(new Map());
   let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent
-  let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp 
+  let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp
+  let lastPolledMessageId = $state<number>(0); // Track last message ID from polling to avoid redundant checks 
   
   // Derived state: unique messages sorted correctly
   let uniqueMessages = $derived.by(() => {
@@ -258,6 +259,109 @@
         console.error("Error fetching online users:", e);
       }
     }, 5000);
+
+    return () => clearInterval(intervalId);
+  });
+
+  // Polling fallback: Check for new messages every 3 seconds
+  // This ensures messages appear even if SSE fails or users are on different server instances
+  $effect(() => {
+    if (!select) return;
+    
+    let consecutiveErrors = 0;
+    const maxErrors = 3;
+    
+    const checkForNewMessages = async () => {
+      if (!select || isLoadingMessages) return;
+      
+      try {
+        const formData = new FormData();
+        formData.append("user_id", select.id);
+        formData.append("_t", Date.now().toString()); // Cache buster for Vercel
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        
+        const response = await fetch("/chat/loadMessages", {
+          method: "POST",
+          body: formData,
+          cache: "no-store",
+          credentials: "include",
+          headers: {
+            'Cache-Control': 'no-cache',
+          },
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        consecutiveErrors = 0; // Reset error count on success
+
+        if (result.messages && select) {
+          const serverMessages: Mess[] = result.messages.map((msg: any) => ({
+            ...msg,
+            message_type: msg.message_type || "text",
+            fromSelf: msg.sender_id === data.user.id,
+          }));
+
+          // Track all server messages
+          serverMessages.forEach((msg: any) => {
+            processedMessageIds.add(msg.id);
+            if (msg.sender_id === myId) {
+              sentMessageIds.add(msg.id);
+            }
+          });
+
+          // Find new messages that we don't have yet
+          const currentIds = new Set(mes.map(m => m.id));
+          const newMessages = serverMessages.filter(msg => 
+            !currentIds.has(msg.id) && 
+            msg.id > 0 && // Ignore optimistic messages
+            msg.id > lastPolledMessageId // Only messages newer than last poll
+          );
+
+          if (newMessages.length > 0) {
+            console.log(`[POLLING] Found ${newMessages.length} new messages`);
+            
+            // Update last polled message ID
+            const maxId = Math.max(...newMessages.map(m => m.id));
+            lastPolledMessageId = maxId;
+            
+            // Add new messages
+            mes = [...mes, ...newMessages];
+            allMessages = [...allMessages, ...newMessages];
+          } else if (serverMessages.length > 0) {
+            // Update lastPolledMessageId even if no new messages
+            const maxId = Math.max(...serverMessages.filter(m => m.id > 0).map(m => m.id));
+            if (maxId > lastPolledMessageId) {
+              lastPolledMessageId = maxId;
+            }
+          }
+        }
+      } catch (error) {
+        consecutiveErrors++;
+        console.error(`[POLLING ERROR ${consecutiveErrors}/${maxErrors}]:`, error);
+        
+        // If too many consecutive errors, stop polling temporarily
+        if (consecutiveErrors >= maxErrors) {
+          console.warn("[POLLING] Too many errors, will retry in 10 seconds");
+          setTimeout(() => {
+            consecutiveErrors = 0; // Reset after cooldown
+          }, 10000);
+        }
+      }
+    };
+
+    // Initial check immediately
+    checkForNewMessages();
+    
+    // Poll every 3 seconds
+    const intervalId = setInterval(checkForNewMessages, 3000);
 
     return () => clearInterval(intervalId);
   });
@@ -550,6 +654,7 @@
     pendingMessageIds.clear(); 
     pendingMessagesMap.clear();
     sentMessageIds.clear(); // Clear sent message tracking
+    lastPolledMessageId = 0; // Reset polling tracker
     messageSequence = 0; 
     loadingMessages = true;
 

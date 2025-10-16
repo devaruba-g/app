@@ -28,7 +28,12 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     }));
 
     return new Response(JSON.stringify({ messages }), {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      },
     });
   } catch (err) {
     console.error('Load messages error:', err);
