@@ -33,7 +33,8 @@
     file_path?: string;
     created_at: Date;
     fromSelf: boolean;
-    sequence?: number; // For maintaining order
+    sequence?: number;
+    clientTimestamp?: number; // Client-side timestamp for ordering
   }
   let users = $state<User[]>(data.users || []);
   let select = $state<User | null>(null);
@@ -55,9 +56,61 @@
   let pendingMessageIds = $state<Set<number>>(new Set());
   let pendingMessagesMap = $state<Map<number, {content: string, receiver_id: string, timestamp: number, sequence: number}>>(new Map());
   let messageSequence = 0;
+  let clientSequence = 0; // Global sequence counter for all messages
   let processedMessageIds = $state<Set<number>>(new Set());
   let verifyMessagesTimeout: ReturnType<typeof setTimeout> | null = null;
-  let messageOrderMap = $state<Map<number, number>>(new Map()); // Maps message ID to sequence number
+  let messageOrderMap = $state<Map<number, number>>(new Map());
+  let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent 
+  
+  // Derived state: unique messages sorted correctly
+  let uniqueMessages = $derived.by(() => {
+    const seen = new Set<number>();
+    const unique: Mess[] = [];
+    
+    for (const msg of mes) {
+      if (!seen.has(msg.id)) {
+        seen.add(msg.id);
+        unique.push(msg);
+      } else {
+        console.warn(`[DUPLICATE DETECTED] Filtering out duplicate message ID: ${msg.id}`);
+      }
+    }
+    
+    // Sort messages with intelligent ordering
+    return unique.sort((a, b) => {
+      // For messages with client timestamp (our sent messages), use it
+      const hasClientTimestampA = a.clientTimestamp !== undefined;
+      const hasClientTimestampB = b.clientTimestamp !== undefined;
+      
+      // If both have client timestamps (both are our messages), sort by client time + sequence
+      if (hasClientTimestampA && hasClientTimestampB) {
+        if (a.clientTimestamp! !== b.clientTimestamp!) {
+          return a.clientTimestamp! - b.clientTimestamp!;
+        }
+        if (a.sequence !== undefined && b.sequence !== undefined) {
+          return a.sequence - b.sequence;
+        }
+        return a.id - b.id;
+      }
+      
+      // If neither has client timestamp (both received), use database ID (auto-increment = chronological)
+      if (!hasClientTimestampA && !hasClientTimestampB) {
+        return a.id - b.id;
+      }
+      
+      // Mixed case: compare server timestamps
+      const timeA = a.clientTimestamp || new Date(a.created_at).getTime();
+      const timeB = b.clientTimestamp || new Date(b.created_at).getTime();
+      
+      // If timestamps are very close (within 100ms), use ID for stability
+      const timeDiff = Math.abs(timeA - timeB);
+      if (timeDiff < 100) {
+        return a.id - b.id;
+      }
+      
+      return timeA - timeB;
+    });
+  });
 
   function openImageModal(src: string) {
     modalImageSrc = src;
@@ -70,12 +123,12 @@
   }
 
   function scheduleMessageVerification() {
-    // Clear any existing timeout
+
     if (verifyMessagesTimeout) {
       clearTimeout(verifyMessagesTimeout);
     }
     
-    // Only verify if there are still pending messages after 5 seconds
+
     verifyMessagesTimeout = setTimeout(() => {
       if (select?.id && pendingMessagesMap.size > 0) {
         console.log("Some messages still pending, verifying...");
@@ -175,7 +228,7 @@
     }
   }
   $effect(() => {
-    if (mes.length > 0) {
+    if (uniqueMessages.length > 0) {
       scrollToBottom();
     }
   });
@@ -263,96 +316,125 @@
         const payload = JSON.parse(ev.data);
         console.log("Parsed SSE payload:", payload);
 
+        // CRITICAL FIRST CHECK: If this message was sent by me, NEVER process it
+        // We already have the optimistic update in place
+        if (payload.sender_id === myId) {
+          console.log("[BLOCKED] Message sent by me - ignoring from SSE");
+          
+          // Mark this ID as sent by us to prevent any future processing
+          sentMessageIds.add(payload.id);
+          processedMessageIds.add(payload.id);
+          
+          // Only update if we're in the active chat with the receiver
+          if (select && payload.receiver_id === select.id) {
+            // Find the pending message by content and receiver
+            const pendingEntry = Array.from(pendingMessagesMap.entries()).find(
+              ([_, data]) => data.content === payload.content && data.receiver_id === payload.receiver_id
+            );
+            
+            if (pendingEntry) {
+              const [tempId, msgData] = pendingEntry;
+              console.log(`[UPDATE] Replacing temp ID ${tempId} with real ID ${payload.id}`);
+              
+              // Find the optimistic message in the array
+              const messageIndex = mes.findIndex(m => m.id === tempId);
+              
+              if (messageIndex !== -1) {
+                // Create a new message object with the real ID, preserving client timestamp and sequence
+                const updatedMessage = {
+                  ...mes[messageIndex],
+                  id: payload.id,
+                  file_path: payload.file_path || mes[messageIndex].file_path,
+                  created_at: payload.created_at ? new Date(payload.created_at) : mes[messageIndex].created_at,
+                  // Keep client timestamp and sequence for proper ordering
+                  clientTimestamp: mes[messageIndex].clientTimestamp,
+                  sequence: mes[messageIndex].sequence
+                };
+                
+                // Replace the message in a new array
+                const newMes = [...mes];
+                newMes[messageIndex] = updatedMessage;
+                mes = newMes;
+                
+                // Update allMessages too
+                const allMessageIndex = allMessages.findIndex(m => m.id === tempId);
+                if (allMessageIndex !== -1) {
+                  const newAllMessages = [...allMessages];
+                  newAllMessages[allMessageIndex] = updatedMessage;
+                  allMessages = newAllMessages;
+                }
+                
+                console.log(`[SUCCESS] Updated message from temp ID ${tempId} to real ID ${payload.id}`);
+              }
+              
+              // Clean up tracking
+              pendingMessageIds.delete(tempId);
+              pendingMessagesMap.delete(tempId);
+            } else {
+              console.warn(`[WARNING] No pending message found for content: "${payload.content}"`);
+            }
+          }
+          
+          return; // ALWAYS return here - never add our own messages from SSE
+        }
+
+        // Handle notifications if no chat is selected
         if (!select) {
           console.log("No user selected, handling as notification");
           handleNotificationMessage(payload);
           return;
         }
 
+        // Check if this message is for the active chat (only messages FROM other user TO me)
         const isForActiveChat =
-          (payload.sender_id === select.id && payload.receiver_id === myId) ||
-          (payload.receiver_id === select.id && payload.sender_id === myId);
+          (payload.sender_id === select.id && payload.receiver_id === myId);
 
         if (isForActiveChat) {
-          console.log("Message is for active chat");
-          // Prevent duplicate processing
-          if (processedMessageIds.has(payload.id)) {
-            console.log("Message already processed, skipping");
+          console.log("[RECEIVE] Message for active chat from other user");
+          
+          // Triple safety check - this should never be our own message
+          if (payload.sender_id === myId) {
+            console.error("[ERROR] Our own message passed first check - blocking");
             return;
           }
+          
+          if (sentMessageIds.has(payload.id)) {
+            console.log("[BLOCKED] Message ID in sent list");
+            return;
+          }
+          
+          // Prevent duplicate processing
+          if (processedMessageIds.has(payload.id)) {
+            console.log("[BLOCKED] Message already processed");
+            return;
+          }
+          
+          // Check if message already exists
+          if (mes.some((m) => m.id === payload.id)) {
+            console.log("[BLOCKED] Message already in list");
+            return;
+          }
+          
           processedMessageIds.add(payload.id);
           
-          if (!mes.some((m) => m.id === payload.id)) {
-            const newMessage = {
-              id: payload.id ?? Date.now(),
-              sender_id: payload.sender_id,
-              receiver_id: payload.receiver_id,
-              content: payload.content,
-              message_type: payload.message_type || "text",
-              file_path: payload.file_path,
-              created_at: payload.created_at ? new Date(payload.created_at) : new Date(),
-              fromSelf: payload.sender_id === myId,
-            };
+          const newMessage: Mess = {
+            id: payload.id ?? Date.now(),
+            sender_id: payload.sender_id,
+            receiver_id: payload.receiver_id,
+            content: payload.content,
+            message_type: payload.message_type || "text",
+            file_path: payload.file_path,
+            created_at: payload.created_at ? new Date(payload.created_at) : new Date(),
+            fromSelf: false,
+            clientTimestamp: new Date(payload.created_at).getTime(),
+          };
 
-            if (payload.sender_id === myId) {
-              // Find matching optimistic message by content and receiver
-              let optimisticMsgId: number | null = null;
-              let matchedSequence: number | undefined;
-              
-              // Find the oldest matching optimistic message (FIFO order)
-              let oldestTimestamp = Infinity;
-              for (const [tempId, msgData] of pendingMessagesMap.entries()) {
-                if (msgData.content === payload.content && msgData.receiver_id === payload.receiver_id) {
-                  if (msgData.timestamp < oldestTimestamp) {
-                    oldestTimestamp = msgData.timestamp;
-                    optimisticMsgId = tempId;
-                    matchedSequence = msgData.sequence;
-                  }
-                }
-              }
-              
-              if (optimisticMsgId !== null) {
-                // Replace optimistic message with real one, preserving position and sequence
-                console.log(`Replacing optimistic message ${optimisticMsgId} with real message ${payload.id}`);
-                pendingMessageIds.delete(optimisticMsgId);
-                pendingMessagesMap.delete(optimisticMsgId);
-                
-                // Preserve the sequence number from optimistic message
-                const updatedMessage = { ...newMessage, sequence: matchedSequence };
-                if (matchedSequence !== undefined) {
-                  messageOrderMap.set(payload.id, matchedSequence);
-                }
-                
-                mes = mes.map(m => m.id === optimisticMsgId ? updatedMessage : m);
-                allMessages = allMessages.map(m => m.id === optimisticMsgId ? updatedMessage : m);
-              } else {
-                // Add new message if no optimistic match found
-                console.log(`No optimistic match found for message ${payload.id}, adding directly`);
-                mes = [...mes, newMessage];
-                allMessages = [...allMessages, newMessage];
-              }
-            } else {
-              // Message from other user - insert in correct position based on ID
-              // Database IDs are sequential and more reliable than timestamps for ordering
-              const insertIndex = mes.findIndex(m => m.id > newMessage.id);
-              if (insertIndex === -1) {
-                // Add to end if no larger ID found
-                mes = [...mes, newMessage];
-              } else {
-                // Insert at correct position
-                mes = [...mes.slice(0, insertIndex), newMessage, ...mes.slice(insertIndex)];
-              }
-              
-              const allInsertIndex = allMessages.findIndex(m => m.id > newMessage.id);
-              if (allInsertIndex === -1) {
-                allMessages = [...allMessages, newMessage];
-              } else {
-                allMessages = [...allMessages.slice(0, allInsertIndex), newMessage, ...allMessages.slice(allInsertIndex)];
-              }
-              
-              markMessageAsSeenImmediately(payload.id, payload.sender_id);
-            }
-          }
+          console.log(`[ADD] Adding new message ID ${payload.id} to chat`);
+          // Add message - sorting will be handled by uniqueMessages derived state
+          mes = [...mes, newMessage];
+          allMessages = [...allMessages, newMessage];
+          
+          markMessageAsSeenImmediately(payload.id, payload.sender_id);
         } else {
           console.log(
             "Message is not for active chat, handling as notification",
@@ -421,6 +503,14 @@
         fromSelf: msg.sender_id === data.user.id,
       }));
       allMessages = formatted;
+      
+      // Track all initial messages to prevent SSE duplicates
+      formatted.forEach((msg: any) => {
+        processedMessageIds.add(msg.id);
+        if (msg.sender_id === myId) {
+          sentMessageIds.add(msg.id);
+        }
+      });
 
       if (data.selectedUserId) {
         mes = formatted.filter(
@@ -439,10 +529,11 @@
     select = selectedUser;
     currentSelectedId = selectedUser.id;
     mes = [];
-    processedMessageIds.clear(); // Clear processed IDs when switching chats
-    pendingMessageIds.clear(); // Clear pending messages
-    pendingMessagesMap.clear(); // Clear pending map
-    messageSequence = 0; // Reset sequence counter for new chat
+    processedMessageIds.clear(); 
+    pendingMessageIds.clear(); 
+    pendingMessagesMap.clear();
+    sentMessageIds.clear(); // Clear sent message tracking
+    messageSequence = 0; 
     loadingMessages = true;
 
     if (
@@ -493,33 +584,32 @@
           fromSelf: msg.sender_id === data.user.id,
         }));
 
-        // Create a map of server messages by ID for quick lookup
+
         const serverMessageMap = new Map<number, Mess>(serverMessages.map((m) => [m.id, m]));
         
-        // Update processed message IDs
-        serverMessages.forEach((msg: any) => processedMessageIds.add(msg.id));
+  
+        serverMessages.forEach((msg: any) => {
+          processedMessageIds.add(msg.id);
+          // Track our own messages to prevent SSE duplicates
+          if (msg.sender_id === myId) {
+            sentMessageIds.add(msg.id);
+          }
+        });
         
-        // Build the final message list
+
+        // Merge server messages with pending optimistic messages
         const finalMessages: Mess[] = [];
         const addedIds = new Set<number>();
         
-        // First, add all messages from current mes array
+        // First, add all pending optimistic messages (keep them in order)
         for (const msg of mes) {
           if (pendingMessageIds.has(msg.id)) {
-            // Keep optimistic message if not yet confirmed
             finalMessages.push(msg);
             addedIds.add(msg.id);
-          } else if (serverMessageMap.has(msg.id)) {
-            // Use server version if available
-            const serverMsg = serverMessageMap.get(msg.id);
-            if (serverMsg) {
-              finalMessages.push(serverMsg);
-              addedIds.add(msg.id);
-            }
           }
         }
         
-        // Add any new server messages that weren't in the current list
+        // Then add all server messages that aren't duplicates
         for (const serverMsg of serverMessages) {
           if (!addedIds.has(serverMsg.id)) {
             finalMessages.push(serverMsg);
@@ -527,41 +617,12 @@
           }
         }
         
-        // Sort messages: use sequence for optimistic messages, ID for confirmed messages
+        // Sort by ID (database auto-increment ensures correct order)
+        // Negative IDs (optimistic) will appear first, then positive IDs in order
         finalMessages.sort((a, b) => {
-          // Check if messages have sequences (optimistic/pending messages)
-          const seqA = a.sequence ?? messageOrderMap.get(a.id);
-          const seqB = b.sequence ?? messageOrderMap.get(b.id);
-          
-          // If both have sequences, sort by sequence (maintains send order)
-          if (seqA !== undefined && seqB !== undefined) {
-            return seqA - seqB;
-          }
-          
-          // If only A has sequence, check if it should come before B
-          if (seqA !== undefined) {
-            // Compare optimistic message timestamp with B's timestamp
-            const timeA = new Date(a.created_at).getTime();
-            const timeB = new Date(b.created_at).getTime();
-            if (Math.abs(timeA - timeB) > 1000) { // More than 1 second difference
-              return timeA - timeB;
-            }
-            // If close in time, use ID
-            return a.id - b.id;
-          }
-          
-          // If only B has sequence
-          if (seqB !== undefined) {
-            const timeA = new Date(a.created_at).getTime();
-            const timeB = new Date(b.created_at).getTime();
-            if (Math.abs(timeA - timeB) > 1000) {
-              return timeA - timeB;
-            }
-            return a.id - b.id;
-          }
-          
-          // Neither has sequence - use ID as primary (database auto-increment is reliable)
-          // For rapid messages, ID order is more reliable than timestamp
+          // Keep pending messages at the end (they have negative IDs)
+          if (a.id < 0 && b.id > 0) return 1;
+          if (a.id > 0 && b.id < 0) return -1;
           return a.id - b.id;
         });
         
@@ -580,9 +641,11 @@
     const receiverId = select.id;
     input = "";
 
-    // Create unique temp ID with sequence to maintain order
-    const currentSequence = messageSequence++;
-    const tempId = -(Date.now() * 1000 + currentSequence);
+    // Create optimistic message with temporary negative ID
+    const tempId = -(Date.now());
+    const currentClientTimestamp = Date.now();
+    const currentSequence = clientSequence++; // Increment global sequence
+    
     const optimisticMessage: Mess = {
       id: tempId,
       sender_id: myId,
@@ -591,32 +654,20 @@
       message_type: "text",
       created_at: new Date(),
       fromSelf: true,
+      clientTimestamp: currentClientTimestamp,
       sequence: currentSequence,
     };
     
-    // Track pending message with timestamp and sequence
+    // Track pending message
     pendingMessageIds.add(tempId);
     pendingMessagesMap.set(tempId, { 
       content: messageContent, 
       receiver_id: receiverId,
-      timestamp: Date.now(),
+      timestamp: currentClientTimestamp,
       sequence: currentSequence
     });
-    messageOrderMap.set(tempId, currentSequence);
     
-    // Set timeout to clean up if SSE doesn't arrive (fallback after 10 seconds)
-    setTimeout(() => {
-      if (pendingMessagesMap.has(tempId)) {
-        console.warn(`Optimistic message ${tempId} not confirmed after 10s, cleaning up`);
-        pendingMessageIds.delete(tempId);
-        pendingMessagesMap.delete(tempId);
-        // Force reload messages to get correct state
-        if (select?.id === receiverId) {
-          loadMessages(receiverId);
-        }
-      }
-    }, 10000);
-    
+    // Add optimistic message to UI immediately
     mes = [...mes, optimisticMessage];
     allMessages = [...allMessages, optimisticMessage];
 
@@ -630,18 +681,21 @@
         credentials: "include",
       });
       const result = await response.json();
-      if (!result.success) {
+      
+      if (result.success) {
+        // Message sent successfully - SSE will handle updating the temp ID to real ID
+        console.log(`Message sent successfully with ID ${result.id}`);
+      } else {
         console.error("Failed to send message", result.message);
-        // Remove failed message
+        // Remove optimistic message on failure
         mes = mes.filter(m => m.id !== tempId);
         allMessages = allMessages.filter(m => m.id !== tempId);
         pendingMessageIds.delete(tempId);
         pendingMessagesMap.delete(tempId);
       }
-
     } catch (error) {
       console.error("Error saving message:", error);
-      // Remove failed message
+      // Remove optimistic message on error
       mes = mes.filter(m => m.id !== tempId);
       allMessages = allMessages.filter(m => m.id !== tempId);
       pendingMessageIds.delete(tempId);
@@ -798,12 +852,46 @@
     }
 
     isUploading = true;
+    const fileToUpload = selectedFile;
+    const receiverId = select.id;
+    selectedFile = null; // Clear immediately
     console.log("Starting upload...");
+
+    // Create optimistic message
+    const tempId = -(Date.now());
+    const currentClientTimestamp = Date.now();
+    const currentSequence = clientSequence++; // Increment global sequence
+    
+    const optimisticMessage: Mess = {
+      id: tempId,
+      sender_id: myId,
+      receiver_id: receiverId,
+      content: fileToUpload.name,
+      message_type: "image",
+      file_path: URL.createObjectURL(fileToUpload), // Temporary preview
+      created_at: new Date(),
+      fromSelf: true,
+      clientTimestamp: currentClientTimestamp,
+      sequence: currentSequence,
+    };
+    
+    // Track pending message
+    pendingMessageIds.add(tempId);
+    pendingMessagesMap.set(tempId, { 
+      content: fileToUpload.name, 
+      receiver_id: receiverId,
+      timestamp: currentClientTimestamp,
+      sequence: currentSequence
+    });
+    
+    // Add optimistic message to UI
+    mes = [...mes, optimisticMessage];
+    allMessages = [...allMessages, optimisticMessage];
 
     try {
       const formData = new FormData();
-      formData.append("image", selectedFile);
-      formData.append("receiver_id", select.id);
+      formData.append("image", fileToUpload);
+      formData.append("receiver_id", receiverId);
 
       console.log("Sending request to /chat/upload");
       const response = await fetch("/chat/upload", {
@@ -817,12 +905,23 @@
       console.log("Upload result:", result);
 
       if (result.success) {
-        selectedFile = null;
+        console.log(`Image uploaded successfully with ID ${result.id}`);
+        // SSE will handle updating the temp ID to real ID with actual base64 data
       } else {
         console.error("Failed to upload image:", result.error);
+        // Remove optimistic message on failure
+        mes = mes.filter(m => m.id !== tempId);
+        allMessages = allMessages.filter(m => m.id !== tempId);
+        pendingMessageIds.delete(tempId);
+        pendingMessagesMap.delete(tempId);
       }
     } catch (error) {
       console.error("Error uploading image:", error);
+      // Remove optimistic message on error
+      mes = mes.filter(m => m.id !== tempId);
+      allMessages = allMessages.filter(m => m.id !== tempId);
+      pendingMessageIds.delete(tempId);
+      pendingMessagesMap.delete(tempId);
     } finally {
       isUploading = false;
     }
@@ -1159,13 +1258,13 @@
         <div class="text-gray-400 font-bold text-center mt-10">
           Loading messages...
         </div>
-      {:else if mes.length === 0}
+      {:else if uniqueMessages.length === 0}
         <div class="text-gray-400 font-bold text-center mt-10">
           No messages yet
         </div>
       {/if}
 
-      {#each mes as msg (msg.id)}
+      {#each uniqueMessages as msg (msg.id)}
         <div
           class="flex mb-3"
           class:justify-end={msg.fromSelf}
@@ -1254,7 +1353,6 @@
     </div>
   </div>
 </div>
-
 <style>
   .custom-scrollbar {
     scrollbar-color: grey transparent;
