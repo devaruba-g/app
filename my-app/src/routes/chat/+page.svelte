@@ -75,6 +75,11 @@
         unique.push(msg);
       } else {
         console.warn(`[DUPLICATE DETECTED] Filtering out duplicate message ID: ${msg.id}`);
+        console.warn(`[DUPLICATE DETECTED] Content: "${msg.content}"`);
+        console.warn(`[DUPLICATE DETECTED] Sender: ${msg.sender_id}`);
+        console.warn(`[DUPLICATE DETECTED] fromSelf: ${msg.fromSelf}`);
+        console.warn(`[DUPLICATE DETECTED] Total messages in mes: ${mes.length}`);
+        console.warn(`[DUPLICATE DETECTED] Unique messages so far: ${unique.length}`);
       }
     }
     
@@ -322,21 +327,38 @@
           const newMessages = serverMessages.filter(msg => 
             !currentIds.has(msg.id) && 
             msg.id > 0 && // Ignore optimistic messages
-            msg.id > lastPolledMessageId // Only messages newer than last poll
+            msg.id > lastPolledMessageId && // Only messages newer than last poll
+            msg.sender_id !== myId // CRITICAL: Don't add our own messages via polling!
           );
 
           if (newMessages.length > 0) {
-            console.log(`[POLLING] Found ${newMessages.length} new messages`);
+            console.log(`[POLLING] Found ${newMessages.length} new messages from other user`);
             
-            // Update last polled message ID
-            const maxId = Math.max(...newMessages.map(m => m.id));
-            lastPolledMessageId = maxId;
+            // DOUBLE CHECK: Filter out any that somehow already exist
+            const currentMesIds = new Set(mes.map(m => m.id));
+            const safeNewMessages = newMessages.filter(msg => !currentMesIds.has(msg.id));
             
-            // Add new messages
-            mes = [...mes, ...newMessages];
-            allMessages = [...allMessages, ...newMessages];
-          } else if (serverMessages.length > 0) {
-            // Update lastPolledMessageId even if no new messages
+            if (safeNewMessages.length !== newMessages.length) {
+              console.warn(`[POLLING] Filtered out ${newMessages.length - safeNewMessages.length} messages that already exist`);
+            }
+            
+            if (safeNewMessages.length > 0) {
+              safeNewMessages.forEach(msg => {
+                console.log(`[POLLING] - ID ${msg.id}, Sender: ${msg.sender_id}, Content: "${msg.content}"`);
+              });
+              console.log(`[POLLING] Before add - mes length: ${mes.length}`);
+              
+              // Add new messages (only from other user)
+              mes = [...mes, ...safeNewMessages];
+              allMessages = [...allMessages, ...safeNewMessages];
+              
+              console.log(`[POLLING] After add - mes length: ${mes.length}`);
+            }
+          }
+          
+          // Update lastPolledMessageId for ALL messages (including our own)
+          // This prevents re-checking messages we've already seen
+          if (serverMessages.length > 0) {
             const maxId = Math.max(...serverMessages.filter(m => m.id > 0).map(m => m.id));
             if (maxId > lastPolledMessageId) {
               lastPolledMessageId = maxId;
@@ -440,11 +462,15 @@
         // CRITICAL FIRST CHECK: If this message was sent by me, NEVER process it
         // We already have the optimistic update in place
         if (payload.sender_id === myId) {
-          console.log("[BLOCKED] Message sent by me - ignoring from SSE");
+          console.log(`[BLOCKED SSE] Message ID ${payload.id} sent by me - ignoring from SSE`);
+          console.log(`[BLOCKED SSE] Content: "${payload.content}"`);
           
           // Mark this ID as sent by us to prevent any future processing
           sentMessageIds.add(payload.id);
           processedMessageIds.add(payload.id);
+          
+          console.log(`[TRACKING] sentMessageIds now has ${sentMessageIds.size} IDs`);
+          console.log(`[TRACKING] Current mes array has ${mes.length} messages`);
           
           // Only update if we're in the active chat with the receiver
           if (select && payload.receiver_id === select.id) {
@@ -455,44 +481,64 @@
             
             if (pendingEntry) {
               const [tempId, msgData] = pendingEntry;
-              console.log(`[UPDATE] Replacing temp ID ${tempId} with real ID ${payload.id}`);
+              console.log(`[UPDATE SSE] Found pending message with temp ID ${tempId}`);
+              console.log(`[UPDATE SSE] Replacing temp ID ${tempId} with real ID ${payload.id}`);
               
               // Find the optimistic message in the array
               const messageIndex = mes.findIndex(m => m.id === tempId);
+              console.log(`[UPDATE SSE] Message index in array: ${messageIndex}`);
               
               if (messageIndex !== -1) {
-                // Create a new message object with the real ID, preserving client timestamp and sequence
-                const updatedMessage = {
-                  ...mes[messageIndex],
-                  id: payload.id,
-                  file_path: payload.file_path || mes[messageIndex].file_path,
-                  created_at: payload.created_at ? new Date(payload.created_at) : mes[messageIndex].created_at,
-                  // Keep client timestamp and sequence for proper ordering
-                  clientTimestamp: mes[messageIndex].clientTimestamp,
-                  sequence: mes[messageIndex].sequence
-                };
-                
-                // Replace the message in a new array
-                const newMes = [...mes];
-                newMes[messageIndex] = updatedMessage;
-                mes = newMes;
-                
-                // Update allMessages too
-                const allMessageIndex = allMessages.findIndex(m => m.id === tempId);
-                if (allMessageIndex !== -1) {
-                  const newAllMessages = [...allMessages];
-                  newAllMessages[allMessageIndex] = updatedMessage;
-                  allMessages = newAllMessages;
+                // CRITICAL: Check if real ID already exists before updating
+                const realIdExists = mes.some(m => m.id === payload.id);
+                if (realIdExists) {
+                  console.error(`[ERROR SSE] Real ID ${payload.id} already exists! Removing temp message instead.`);
+                  mes = mes.filter(m => m.id !== tempId);
+                  allMessages = allMessages.filter(m => m.id !== tempId);
+                } else {
+                  // Create a new message object with the real ID, preserving client timestamp and sequence
+                  const updatedMessage = {
+                    ...mes[messageIndex],
+                    id: payload.id,
+                    file_path: payload.file_path || mes[messageIndex].file_path,
+                    created_at: payload.created_at ? new Date(payload.created_at) : mes[messageIndex].created_at,
+                    // Keep client timestamp and sequence for proper ordering
+                    clientTimestamp: mes[messageIndex].clientTimestamp,
+                    sequence: mes[messageIndex].sequence
+                  };
+                  
+                  // Replace the message in a new array
+                  const newMes = [...mes];
+                  newMes[messageIndex] = updatedMessage;
+                  mes = newMes;
+                  
+                  // Update allMessages too
+                  const allMessageIndex = allMessages.findIndex(m => m.id === tempId);
+                  if (allMessageIndex !== -1) {
+                    const newAllMessages = [...allMessages];
+                    newAllMessages[allMessageIndex] = updatedMessage;
+                    allMessages = newAllMessages;
+                  }
+                  
+                  console.log(`[SUCCESS SSE] Updated message from temp ID ${tempId} to real ID ${payload.id}`);
                 }
-                
-                console.log(`[SUCCESS] Updated message from temp ID ${tempId} to real ID ${payload.id}`);
               }
               
               // Clean up tracking
               pendingMessageIds.delete(tempId);
               pendingMessagesMap.delete(tempId);
             } else {
-              console.warn(`[WARNING] No pending message found for content: "${payload.content}"`);
+              console.warn(`[WARNING SSE] No pending message found for ID ${payload.id}`);
+              console.warn(`[WARNING SSE] Content: "${payload.content}"`);
+              console.warn(`[WARNING SSE] Receiver: ${payload.receiver_id}`);
+              console.warn(`[WARNING SSE] Current pending map size: ${pendingMessagesMap.size}`);
+              console.warn(`[WARNING SSE] Current mes length: ${mes.length}`);
+              
+              // Check if this message already exists in mes
+              const existsInMes = mes.some(m => m.id === payload.id);
+              if (existsInMes) {
+                console.warn(`[WARNING SSE] Message ID ${payload.id} already exists in mes array!`);
+              }
             }
           }
           
@@ -550,10 +596,22 @@
             clientTimestamp: new Date(payload.created_at).getTime(),
           };
 
-          console.log(`[ADD] Adding new message ID ${payload.id} to chat`);
+          // FINAL CHECK: Make absolutely sure this message doesn't already exist
+          const alreadyExists = mes.some(m => m.id === payload.id);
+          if (alreadyExists) {
+            console.warn(`[BLOCKED SSE] Message ID ${payload.id} already exists in mes array!`);
+            return;
+          }
+          
+          console.log(`[ADD SSE] Adding new message ID ${payload.id} from other user`);
+          console.log(`[ADD SSE] Sender: ${payload.sender_id}, Content: "${payload.content}"`);
+          console.log(`[ADD SSE] Before add - mes length: ${mes.length}`);
+          
           // Add message - sorting will be handled by uniqueMessages derived state
           mes = [...mes, newMessage];
           allMessages = [...allMessages, newMessage];
+          
+          console.log(`[ADD SSE] After add - mes length: ${mes.length}`);
           
           markMessageAsSeenImmediately(payload.id, payload.sender_id);
         } else {
@@ -791,8 +849,13 @@
     });
     
     // Add optimistic message to UI immediately
+    console.log(`[SEND] Adding optimistic message with temp ID ${tempId}`);
+    console.log(`[SEND] Content: "${messageContent}"`);
+    console.log(`[SEND] Receiver: ${receiverId}`);
+    console.log(`[SEND] Sequence: ${currentSequence}, Timestamp: ${currentClientTimestamp}`);
     mes = [...mes, optimisticMessage];
     allMessages = [...allMessages, optimisticMessage];
+    console.log(`[SEND] mes array now has ${mes.length} messages`);
 
     try {
       const formData = new FormData();
@@ -807,11 +870,14 @@
       
       if (result.success) {
         // Message sent successfully - SSE will handle updating the temp ID to real ID
-        console.log(`Message sent successfully with ID ${result.id}`);
+        console.log(`[SEND SUCCESS] Message sent with real ID ${result.id}`);
+        console.log(`[SEND SUCCESS] Temp ID was ${tempId}`);
         
         // VERCEL FIX: Immediately mark the real ID as sent to prevent SSE duplicates
         sentMessageIds.add(result.id);
         processedMessageIds.add(result.id);
+        console.log(`[SEND SUCCESS] Marked ID ${result.id} as sent`);
+        console.log(`[SEND SUCCESS] sentMessageIds size: ${sentMessageIds.size}`);
       } else {
         console.error("Failed to send message", result.message);
         // Remove optimistic message on failure
