@@ -55,7 +55,9 @@
   let modalImageSrc = $state<string | null>(null);
   let processedMessageIds = $state<Set<number>>(new Set());
   let recentlyProcessedSSE = $state<Map<number, number>>(new Map());
-  let lastPolledMessageId = $state<number>(0); 
+  let lastPolledMessageId = $state<number>(0);
+  let isUpdatingMessages = $state(false);
+  let pendingOperations = $state<Set<string>>(new Set()); 
   
   let allMessages = $derived.by(() => {
     messageUpdateTrigger; 
@@ -64,27 +66,28 @@
 
 
   let uniqueMessages = $derived.by(() => {
- 
     messageUpdateTrigger;
     
     const messages = Array.from(messagesMap.values());
     
- 
+    // Sort messages: real messages by ID, optimistic by timestamp, optimistic before real
     return messages.sort((a, b) => {
       const aReal = a.id > 0;
       const bReal = b.id > 0;
       
-   
+      // Both are real messages - sort by ID (chronological)
       if (aReal && bReal) {
         return a.id - b.id;
       }
 
+      // Both are optimistic - sort by timestamp
       if (!aReal && !bReal) {
         const aTime = a.clientTimestamp ?? Math.abs(a.id);
         const bTime = b.clientTimestamp ?? Math.abs(b.id);
         return aTime - bTime;
       }
 
+      // Mixed: optimistic messages come after real messages
       return aReal ? -1 : 1;
     });
   });
@@ -232,7 +235,13 @@
     const maxErrors = 5;
     
     const checkForNewMessages = async () => {
-      if (!select || isLoadingMessages) return;
+      if (!select || isLoadingMessages || isUpdatingMessages) return;
+      
+      // Skip if there's a pending upload or send operation
+      if (pendingOperations.size > 0) {
+        console.log('[POLLING] Skipping - pending operations:', Array.from(pendingOperations));
+        return;
+      }
       
       try {
         const formData = new FormData();
@@ -265,6 +274,8 @@
         consecutiveErrors = 0; 
 
         if (result.messages && select) {
+          isUpdatingMessages = true;
+          
           const serverMessages: Mess[] = result.messages.map((msg: any) => ({
             ...msg,
             message_type: msg.message_type || "text",
@@ -273,45 +284,45 @@
           }));
 
           let hasNewMessages = false;
+          const newMessages: Mess[] = [];
           
-        
           serverMessages.forEach((msg: Mess) => {
             if (msg.id > 0 && select) {
               const isRelevant = 
                 (msg.sender_id === myId && msg.receiver_id === select.id) ||
                 (msg.sender_id === select.id && msg.receiver_id === myId);
               
-              if (isRelevant && !messagesMap.has(msg.id) && !processedMessageIds.has(msg.id)) {
-                messagesMap.set(msg.id, msg);
+              // Strict deduplication: check all sources
+              const alreadyExists = messagesMap.has(msg.id) || 
+                                   processedMessageIds.has(msg.id) ||
+                                   globalMessagesMap.has(msg.id);
+              
+              if (isRelevant && !alreadyExists) {
+                newMessages.push(msg);
                 hasNewMessages = true;
-                
-      
                 processedMessageIds.add(msg.id);
+                
                 if (msg.id > lastPolledMessageId) {
                   lastPolledMessageId = msg.id;
                 }
-                console.log('[POLLING] New message added:', msg.id, msg.message_type);
-              } else if (processedMessageIds.has(msg.id)) {
-                console.log('[POLLING] Message already processed, skipping:', msg.id);
-              } else if (!isRelevant) {
-                console.log('[POLLING] Message not relevant to current chat, skipping:', msg.id);
+                console.log('[POLLING] New message:', msg.id, msg.message_type);
               }
             }
           });
 
-   
+          // Batch update to prevent flickering
           if (hasNewMessages) {
-            messagesMap = new Map(messagesMap); 
-            messageUpdateTrigger++; 
-            
-          
-            serverMessages.forEach((msg: Mess) => {
-              if (msg.id > 0 && !globalMessagesMap.has(msg.id)) {
-                globalMessagesMap.set(msg.id, msg);
-              }
+            newMessages.forEach(msg => {
+              messagesMap.set(msg.id, msg);
+              globalMessagesMap.set(msg.id, msg);
             });
+            
+            messagesMap = new Map(messagesMap);
             globalMessagesMap = new Map(globalMessagesMap);
+            messageUpdateTrigger++;
           }
+          
+          isUpdatingMessages = false;
         }
       } catch (error) {
         consecutiveErrors++;
@@ -348,6 +359,8 @@
  
   $effect(() => {
     const intervalId = setInterval(async () => {
+      if (isUpdatingMessages || pendingOperations.size > 0) return;
+      
       try {
         const res = await fetch("/chat/notifications", {
           credentials: "include",
@@ -358,12 +371,18 @@
         });
         const data = await res.json();
         
-     
+        let hasNewNotifications = false;
+        
         if (data.messagesBySender) {
           Object.entries(data.messagesBySender).forEach(([senderId, messages]: [string, any]) => {
             if (Array.isArray(messages)) {
               messages.forEach((msg: any) => {
-                if (msg.id && !globalMessagesMap.has(msg.id)) {
+                // Enhanced deduplication
+                const alreadyExists = globalMessagesMap.has(msg.id) || 
+                                     messagesMap.has(msg.id) ||
+                                     processedMessageIds.has(msg.id);
+                
+                if (msg.id && !alreadyExists) {
                   const newMsg: Mess = {
                     id: msg.id,
                     sender_id: senderId,
@@ -375,11 +394,14 @@
                     fromSelf: false,
                   };
                   globalMessagesMap.set(msg.id, newMsg);
+                  processedMessageIds.add(msg.id);
+                  hasNewNotifications = true;
                 }
               });
             }
           });
-          if (Object.keys(data.messagesBySender).length > 0) {
+          
+          if (hasNewNotifications) {
             globalMessagesMap = new Map(globalMessagesMap);
             messageUpdateTrigger++;
           }
@@ -600,6 +622,9 @@
     const receiverId = select.id;
     input = "";
 
+    const operationId = `text-${Date.now()}`;
+    pendingOperations.add(operationId);
+    
     const tempId = -(Date.now());
     const currentClientTimestamp = Date.now();
     
@@ -614,7 +639,6 @@
       clientTimestamp: currentClientTimestamp,
     };
     
-
     messagesMap.set(tempId, optimisticMessage);
     messagesMap = new Map(messagesMap); 
     messageUpdateTrigger++;
@@ -631,10 +655,9 @@
       const result = await response.json();
       
       if (result.success) {
-    
+        // Mark as processed immediately
         processedMessageIds.add(result.id);
 
-   
         const realMessage: Mess = {
           id: result.id,
           sender_id: myId,
@@ -645,28 +668,29 @@
           fromSelf: true,
         };
 
-   
+        // Atomic update: remove temp, add real
         messagesMap.delete(tempId);
         messagesMap.set(result.id, realMessage);
-        messagesMap = new Map(messagesMap); 
+        globalMessagesMap.set(result.id, realMessage);
+        
+        messagesMap = new Map(messagesMap);
+        globalMessagesMap = new Map(globalMessagesMap);
         messageUpdateTrigger++;
         
-       
-        globalMessagesMap.set(result.id, realMessage);
-        globalMessagesMap = new Map(globalMessagesMap);
+        pendingOperations.delete(operationId);
       } else {
         console.error("Failed to send message", result.message);
-     
         messagesMap.delete(tempId);
         messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
+        pendingOperations.delete(operationId);
       }
     } catch (error) {
       console.error("Error saving message:", error);
-    
       messagesMap.delete(tempId);
       messagesMap = new Map(messagesMap);
       messageUpdateTrigger++;
+      pendingOperations.delete(operationId);
     }
   }
 
@@ -813,12 +837,14 @@
       return;
     }
 
+    const operationId = `image-${Date.now()}`;
+    pendingOperations.add(operationId);
     isUploading = true;
+    
     const fileToUpload = selectedFile;
     const receiverId = select.id;
     selectedFile = null; 
 
-  
     const tempId = -(Date.now());
     const currentClientTimestamp = Date.now();
     
@@ -834,7 +860,6 @@
       clientTimestamp: currentClientTimestamp,
     };
     
- 
     messagesMap.set(tempId, optimisticMessage);
     messagesMap = new Map(messagesMap); 
     messageUpdateTrigger++;
@@ -856,10 +881,9 @@
       if (result.success) {
         console.log('[IMAGE] Upload successful, ID:', result.id);
         
-  
+        // Mark as processed FIRST to prevent polling from adding it
         processedMessageIds.add(result.id);
 
-     
         const realMessage: Mess = {
           id: result.id,
           sender_id: myId,
@@ -871,43 +895,30 @@
           fromSelf: true,
         };
 
-        if (messagesMap.has(tempId)) {
-          messagesMap.delete(tempId);
-          console.log('[IMAGE] Removed optimistic message:', tempId);
-        }
-        
-     
-        if (!messagesMap.has(result.id)) {
-          messagesMap.set(result.id, realMessage);
-          console.log('[IMAGE] Added real message:', result.id);
-        } else {
-          console.log('[IMAGE] Real message already exists, skipping:', result.id);
-        }
+        // Atomic update: remove temp, add real to both maps
+        messagesMap.delete(tempId);
+        messagesMap.set(result.id, realMessage);
+        globalMessagesMap.set(result.id, realMessage);
         
         messagesMap = new Map(messagesMap);
+        globalMessagesMap = new Map(globalMessagesMap);
         messageUpdateTrigger++;
         
-     
-        if (!globalMessagesMap.has(result.id)) {
-          globalMessagesMap.set(result.id, realMessage);
-          globalMessagesMap = new Map(globalMessagesMap);
-          console.log('[IMAGE] Added to global messages:', result.id);
-        } else {
-          console.log('[IMAGE] Already in global messages:', result.id);
-        }
+        console.log('[IMAGE] Message updated:', result.id);
+        pendingOperations.delete(operationId);
       } else {
         console.error("Failed to upload image:", result.error);
-    
         messagesMap.delete(tempId);
         messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
+        pendingOperations.delete(operationId);
       }
     } catch (error) {
       console.error("Error uploading image:", error);
-
       messagesMap.delete(tempId);
       messagesMap = new Map(messagesMap);
       messageUpdateTrigger++;
+      pendingOperations.delete(operationId);
     } finally {
       isUploading = false;
     }
