@@ -37,7 +37,9 @@
   }
   let users = $state<User[]>(data.users || []);
   let select = $state<User | null>(null);
-  let mes = $state<Mess[]>([]);
+  let messagesMap = $state<Map<number, Mess>>(new Map()); // Use Map for efficient deduplication
+  let messageUpdateTrigger = $state(0); // Trigger to force reactivity
+  let globalMessagesMap = $state<Map<number, Mess>>(new Map()); // Store ALL messages from ALL conversations
   let input = $state("");
   let notificationCount = $state(0);
   let showNotifications = $state(false);
@@ -46,55 +48,49 @@
   let isUploading = $state(false);
   let selectedFile = $state<File | null>(null);
   let activeTab = $state<"chats" | "all-users">("chats");
-  let allMessages = $state<Mess[]>([]);
   let loadingLogout = $state(false);
   let chatUsers = $state<User[]>([]);
   let allUsers = $state<User[]>([]);
   let showImageModal = $state(false);
   let modalImageSrc = $state<string | null>(null);
   let processedMessageIds = $state<Set<number>>(new Set());
-  let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent
   let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp
-  let lastPolledMessageId = $state<number>(0); // Track last message ID from polling to avoid redundant checks 
-  let sentMessageTimes = $state<Map<number, number>>(new Map()); // realId -> clientTimestamp
+  let lastPolledMessageId = $state<number>(0); // Track last message ID from polling to avoid redundant checks
   
-  // Derived state: unique messages sorted correctly
+  // Derived state: all messages across all conversations for chat history
+  let allMessages = $derived.by(() => {
+    messageUpdateTrigger; // Force reactivity
+    return Array.from(globalMessagesMap.values());
+  });
+
+  // Derived state: messages sorted by ID (server order) with optimistic messages at the end
   let uniqueMessages = $derived.by(() => {
-    const seen = new Set<number>();
-    const unique: Mess[] = [];
+    // Force reactivity by reading the trigger
+    messageUpdateTrigger;
     
-    for (const msg of mes) {
-      if (!seen.has(msg.id)) {
-        seen.add(msg.id);
-        unique.push(msg);
-      }
-    }
+    const messages = Array.from(messagesMap.values());
     
-    // Sort messages deterministically:
-    // 1) If both messages are persisted (id > 0): order strictly by id ASC (DB/SSE order)
-    // 2) Otherwise (optimistic involved): primary by clientTimestamp (if any) else created_at
-    //    with tie-breakers using clientTimestamp or temp id
-    const ts = (m: Mess) => {
-      if (m.clientTimestamp) return m.clientTimestamp;
-      const t = (m.created_at instanceof Date ? m.created_at : new Date(m.created_at)).getTime();
-      return Number.isFinite(t) ? t : 0;
-    };
-    return unique.sort((a, b) => {
+    // Sort messages:
+    // 1. Persisted messages (id > 0) sorted by ID ascending (server insertion order)
+    // 2. Optimistic messages (id < 0) sorted by their timestamp at the end
+    return messages.sort((a, b) => {
       const aReal = a.id > 0;
       const bReal = b.id > 0;
-      if (aReal && bReal) return a.id - b.id; // persisted -> stable by id
-
-      const d = ts(a) - ts(b);
-      if (d !== 0) return d;
-      if (!aReal && !bReal) {
-        const ac = a.clientTimestamp ?? a.id;
-        const bc = b.clientTimestamp ?? b.id;
-        return ac - bc;
+      
+      // Both are real messages - sort by ID (server order)
+      if (aReal && bReal) {
+        return a.id - b.id;
       }
-      // one real, one optimistic and timestamps equal: real first
-      if (aReal && !bReal) return -1;
-      if (!aReal && bReal) return 1;
-      return 0;
+      
+      // Both are optimistic - sort by clientTimestamp or ID
+      if (!aReal && !bReal) {
+        const aTime = a.clientTimestamp ?? Math.abs(a.id);
+        const bTime = b.clientTimestamp ?? Math.abs(b.id);
+        return aTime - bTime;
+      }
+      
+      // Real messages come before optimistic
+      return aReal ? -1 : 1;
     });
   });
 
@@ -277,52 +273,40 @@
             ...msg,
             message_type: msg.message_type || "text",
             fromSelf: msg.sender_id === data.user.id,
-            clientTimestamp: msg.sender_id === myId ? (sentMessageTimes.get(msg.id) ?? undefined) : undefined,
+            created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
           }));
 
-          // Track all server messages
-          serverMessages.forEach((msg: any) => {
-            processedMessageIds.add(msg.id);
-            if (msg.sender_id === myId) {
-              sentMessageIds.add(msg.id);
+          let hasNewMessages = false;
+          
+          // Add or update messages in the map
+          serverMessages.forEach((msg: Mess) => {
+            if (msg.id > 0) {
+              // Only add if we don't have this message yet
+              if (!messagesMap.has(msg.id)) {
+                messagesMap.set(msg.id, msg);
+                hasNewMessages = true;
+                
+                // Update tracking
+                processedMessageIds.add(msg.id);
+                if (msg.id > lastPolledMessageId) {
+                  lastPolledMessageId = msg.id;
+                }
+              }
             }
           });
 
-          // Find new messages that we don't have yet
-          const currentIds = new Set(mes.map(m => m.id));
-          
-          const newMessages = serverMessages.filter(msg => {
-            // Skip if already in our list
-            if (currentIds.has(msg.id)) return false;
+          // If we have new messages, trigger reactivity
+          if (hasNewMessages) {
+            messagesMap = new Map(messagesMap); // Create new reference
+            messageUpdateTrigger++; // Force derived update
             
-            // Skip if it's a real message (positive ID) and we already processed it
-            if (msg.id > 0 && processedMessageIds.has(msg.id)) return false;
-            
-            // Skip if newer than last poll (avoid re-processing)
-            if (msg.id <= lastPolledMessageId) return false;
-            
-            return true;
-          });
-
-          if (newMessages.length > 0) {
-            // Add new messages and mark as processed
-            newMessages.forEach(msg => {
-              processedMessageIds.add(msg.id);
-              if (msg.sender_id === myId) {
-                sentMessageIds.add(msg.id);
+            // Also update global messages map for chat history
+            serverMessages.forEach((msg: Mess) => {
+              if (msg.id > 0 && !globalMessagesMap.has(msg.id)) {
+                globalMessagesMap.set(msg.id, msg);
               }
             });
-            
-            mes = [...mes, ...newMessages];
-            allMessages = [...allMessages, ...newMessages];
-          }
-          
-          // Update lastPolledMessageId
-          if (serverMessages.length > 0) {
-            const maxId = Math.max(...serverMessages.filter(m => m.id > 0).map(m => m.id));
-            if (maxId > lastPolledMessageId) {
-              lastPolledMessageId = maxId;
-            }
+            globalMessagesMap = new Map(globalMessagesMap);
           }
         }
       } catch (error) {
@@ -437,7 +421,7 @@
           }
           
           // Check if message already exists
-          if (mes.some((m) => m.id === payload.id)) {
+          if (messagesMap.has(payload.id)) {
             return;
           }
           
@@ -454,8 +438,13 @@
             fromSelf: false,
           };
           
-          mes = [...mes, newMessage];
-          allMessages = [...allMessages, newMessage];
+          messagesMap.set(payload.id, newMessage);
+          messagesMap = new Map(messagesMap); // Trigger reactivity
+          messageUpdateTrigger++;
+          
+          // Also add to global messages for chat history
+          globalMessagesMap.set(payload.id, newMessage);
+          globalMessagesMap = new Map(globalMessagesMap);
           
           markMessageAsSeenImmediately(payload.id, payload.sender_id);
         } else {
@@ -478,6 +467,23 @@
   function handleNotificationMessage(payload: any) {
     if (payload.receiver_id === myId && payload.sender_id !== myId) {
       const isActivelyChatting = select && select.id === payload.sender_id;
+
+      // Add to global messages for chat history (even if not actively chatting)
+      if (!globalMessagesMap.has(payload.id)) {
+        const globalMessage: Mess = {
+          id: payload.id,
+          sender_id: payload.sender_id,
+          receiver_id: payload.receiver_id,
+          content: payload.content,
+          message_type: payload.message_type || "text",
+          file_path: payload.file_path,
+          created_at: payload.created_at ? new Date(payload.created_at) : new Date(),
+          fromSelf: false,
+        };
+        globalMessagesMap.set(payload.id, globalMessage);
+        globalMessagesMap = new Map(globalMessagesMap);
+        messageUpdateTrigger++;
+      }
 
       if (!isActivelyChatting) {
         console.log(
@@ -521,23 +527,31 @@
       const formatted = data.messages.map((msg: any) => ({
         ...msg,
         fromSelf: msg.sender_id === data.user.id,
+        created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
       }));
-      allMessages = formatted;
       
-      // Track all initial messages to prevent SSE duplicates
-      formatted.forEach((msg: any) => {
+      // Initialize global messages map with all messages
+      formatted.forEach((msg: Mess) => {
+        globalMessagesMap.set(msg.id, msg);
         processedMessageIds.add(msg.id);
-        if (msg.sender_id === myId) {
-          sentMessageIds.add(msg.id);
-        }
       });
+      globalMessagesMap = new Map(globalMessagesMap);
 
       if (data.selectedUserId) {
-        mes = formatted.filter(
+        const selectedMessages = formatted.filter(
           (msg) =>
             msg.sender_id === data.selectedUserId ||
             msg.receiver_id === data.selectedUserId,
         );
+        
+        // Initialize messagesMap with selected user's messages
+        messagesMap.clear();
+        selectedMessages.forEach((msg: Mess) => {
+          messagesMap.set(msg.id, msg);
+        });
+        messagesMap = new Map(messagesMap);
+        messageUpdateTrigger++;
+        
         const selectedUser = users.find((u) => u.id === data.selectedUserId);
         if (selectedUser) select = selectedUser;
       }
@@ -548,9 +562,9 @@
     if (select && select.id === selectedUser.id) return;
     select = selectedUser;
     currentSelectedId = selectedUser.id;
-    mes = [];
+    messagesMap.clear(); // Clear the map
+    messageUpdateTrigger++; // Force reactivity
     processedMessageIds.clear(); 
-    sentMessageIds.clear(); // Clear sent message tracking
     lastPolledMessageId = 0; // Reset polling tracker
     loadingMessages = true;
 
@@ -600,20 +614,31 @@
           ...msg,
           message_type: msg.message_type || "text",
           fromSelf: msg.sender_id === data.user.id,
-          clientTimestamp: msg.sender_id === myId ? (sentMessageTimes.get(msg.id) ?? undefined) : undefined,
+          created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
         }));
 
-        // Track all server messages
-        serverMessages.forEach((msg: any) => {
-          processedMessageIds.add(msg.id);
-          if (msg.sender_id === myId) {
-            sentMessageIds.add(msg.id);
+        // Clear and rebuild the map with server messages
+        const optimisticMessages = Array.from(messagesMap.values()).filter(m => m.id < 0);
+        messagesMap.clear();
+        
+        // Add optimistic messages back
+        optimisticMessages.forEach(msg => messagesMap.set(msg.id, msg));
+        
+        // Add server messages
+        serverMessages.forEach((msg: Mess) => {
+          if (msg.id > 0) {
+            messagesMap.set(msg.id, msg);
+            processedMessageIds.add(msg.id);
+            
+            // Also add to global messages for chat history
+            globalMessagesMap.set(msg.id, msg);
           }
         });
         
-        // Keep any optimistic messages (negative IDs) and add server messages
-        const optimisticMessages = mes.filter(m => m.id < 0);
-        mes = [...optimisticMessages, ...serverMessages];
+        // Create new reference to trigger reactivity
+        messagesMap = new Map(messagesMap);
+        globalMessagesMap = new Map(globalMessagesMap);
+        messageUpdateTrigger++;
         
         // Initialize lastPolledMessageId to prevent re-adding old messages
         if (serverMessages.length > 0) {
@@ -650,8 +675,9 @@
     };
     
     // Add optimistic message to UI immediately
-    mes = [...mes, optimisticMessage];
-    allMessages = [...allMessages, optimisticMessage];
+    messagesMap.set(tempId, optimisticMessage);
+    messagesMap = new Map(messagesMap); // Trigger reactivity
+    messageUpdateTrigger++;
 
     try {
       const formData = new FormData();
@@ -667,9 +693,6 @@
       if (result.success) {
         // Mark IDs to avoid duplicates via polling/SSE
         processedMessageIds.add(result.id);
-        sentMessageIds.add(result.id);
-        // Preserve client-side ordering for this message id
-        sentMessageTimes.set(result.id, currentClientTimestamp);
 
         // Build real message using server-created timestamp
         const realMessage: Mess = {
@@ -680,23 +703,30 @@
           message_type: "text",
           created_at: result.created_at ? new Date(result.created_at) : new Date(),
           fromSelf: true,
-          clientTimestamp: currentClientTimestamp,
         };
 
-        // Replace optimistic message in-place
-        mes = mes.map(m => (m.id === tempId ? realMessage : m));
-        allMessages = allMessages.map(m => (m.id === tempId ? realMessage : m));
+        // Replace optimistic message with real one
+        messagesMap.delete(tempId);
+        messagesMap.set(result.id, realMessage);
+        messagesMap = new Map(messagesMap); // Trigger reactivity
+        messageUpdateTrigger++;
+        
+        // Update global messages
+        globalMessagesMap.set(result.id, realMessage);
+        globalMessagesMap = new Map(globalMessagesMap);
       } else {
         console.error("Failed to send message", result.message);
         // Remove optimistic message on failure
-        mes = mes.filter(m => m.id !== tempId);
-        allMessages = allMessages.filter(m => m.id !== tempId);
+        messagesMap.delete(tempId);
+        messagesMap = new Map(messagesMap);
+        messageUpdateTrigger++;
       }
     } catch (error) {
       console.error("Error saving message:", error);
       // Remove optimistic message on error
-      mes = mes.filter(m => m.id !== tempId);
-      allMessages = allMessages.filter(m => m.id !== tempId);
+      messagesMap.delete(tempId);
+      messagesMap = new Map(messagesMap);
+      messageUpdateTrigger++;
     }
   }
 
@@ -865,8 +895,9 @@
     };
     
     // Add optimistic message to UI
-    mes = [...mes, optimisticMessage];
-    allMessages = [...allMessages, optimisticMessage];
+    messagesMap.set(tempId, optimisticMessage);
+    messagesMap = new Map(messagesMap); // Trigger reactivity
+    messageUpdateTrigger++;
 
     try {
       const formData = new FormData();
@@ -884,9 +915,6 @@
       if (result.success) {
         // Mark to avoid duplicates
         processedMessageIds.add(result.id);
-        sentMessageIds.add(result.id);
-        // Preserve client-side ordering for this image id
-        sentMessageTimes.set(result.id, currentClientTimestamp);
 
         // Build real image message
         const realMessage: Mess = {
@@ -898,23 +926,30 @@
           file_path: result.file_path ?? undefined,
           created_at: result.created_at ? new Date(result.created_at) : new Date(),
           fromSelf: true,
-          clientTimestamp: currentClientTimestamp,
         };
 
         // Replace optimistic with real
-        mes = mes.map(m => (m.id === tempId ? realMessage : m));
-        allMessages = allMessages.map(m => (m.id === tempId ? realMessage : m));
+        messagesMap.delete(tempId);
+        messagesMap.set(result.id, realMessage);
+        messagesMap = new Map(messagesMap); // Trigger reactivity
+        messageUpdateTrigger++;
+        
+        // Update global messages
+        globalMessagesMap.set(result.id, realMessage);
+        globalMessagesMap = new Map(globalMessagesMap);
       } else {
         console.error("Failed to upload image:", result.error);
         // Remove optimistic message on failure
-        mes = mes.filter(m => m.id !== tempId);
-        allMessages = allMessages.filter(m => m.id !== tempId);
+        messagesMap.delete(tempId);
+        messagesMap = new Map(messagesMap);
+        messageUpdateTrigger++;
       }
     } catch (error) {
       console.error("Error uploading image:", error);
       // Remove optimistic message on error
-      mes = mes.filter(m => m.id !== tempId);
-      allMessages = allMessages.filter(m => m.id !== tempId);
+      messagesMap.delete(tempId);
+      messagesMap = new Map(messagesMap);
+      messageUpdateTrigger++;
     } finally {
       isUploading = false;
     }
