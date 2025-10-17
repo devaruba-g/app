@@ -54,7 +54,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     });
 
     return new Response(
-      JSON.stringify({ success: true, id: insertedId }),
+      JSON.stringify({ success: true, id: insertedId, created_at: message.created_at }),
       { status: 200 }
     );
   } catch (err) {

@@ -56,6 +56,7 @@
   let sentMessageIds = $state<Set<number>>(new Set()); // Track IDs of messages we sent
   let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp
   let lastPolledMessageId = $state<number>(0); // Track last message ID from polling to avoid redundant checks 
+  let sentMessageTimes = $state<Map<number, number>>(new Map()); // realId -> clientTimestamp
   
   // Derived state: unique messages sorted correctly
   let uniqueMessages = $derived.by(() => {
@@ -69,15 +70,31 @@
       }
     }
     
-    // Sort messages by ID
-    // Positive IDs (from database) are chronological due to auto-increment
-    // Negative IDs (optimistic) go to the end
+    // Sort messages deterministically:
+    // 1) If both messages are persisted (id > 0): order strictly by id ASC (DB/SSE order)
+    // 2) Otherwise (optimistic involved): primary by clientTimestamp (if any) else created_at
+    //    with tie-breakers using clientTimestamp or temp id
+    const ts = (m: Mess) => {
+      if (m.clientTimestamp) return m.clientTimestamp;
+      const t = (m.created_at instanceof Date ? m.created_at : new Date(m.created_at)).getTime();
+      return Number.isFinite(t) ? t : 0;
+    };
     return unique.sort((a, b) => {
-      // If one is optimistic (negative) and one is real (positive), real comes first
-      if (a.id < 0 && b.id > 0) return 1;
-      if (a.id > 0 && b.id < 0) return -1;
-      // Otherwise sort by ID
-      return a.id - b.id;
+      const aReal = a.id > 0;
+      const bReal = b.id > 0;
+      if (aReal && bReal) return a.id - b.id; // persisted -> stable by id
+
+      const d = ts(a) - ts(b);
+      if (d !== 0) return d;
+      if (!aReal && !bReal) {
+        const ac = a.clientTimestamp ?? a.id;
+        const bc = b.clientTimestamp ?? b.id;
+        return ac - bc;
+      }
+      // one real, one optimistic and timestamps equal: real first
+      if (aReal && !bReal) return -1;
+      if (!aReal && bReal) return 1;
+      return 0;
     });
   });
 
@@ -260,6 +277,7 @@
             ...msg,
             message_type: msg.message_type || "text",
             fromSelf: msg.sender_id === data.user.id,
+            clientTimestamp: msg.sender_id === myId ? (sentMessageTimes.get(msg.id) ?? undefined) : undefined,
           }));
 
           // Track all server messages
@@ -357,10 +375,10 @@
     return () => clearInterval(intervalId);
   });
 
-  $effect(() => {
-    if (sseSource) {
-      sseSource.close();
-    }
+  let sseInitialized = false;
+  onMount(() => {
+    if (sseInitialized) return;
+    sseInitialized = true;
 
     sseSource = new EventSource("/chat/stream");
 
@@ -373,7 +391,7 @@
 
       setTimeout(() => {
         if (sseSource) {
-          sseSource.close();
+          try { sseSource.close(); } catch {}
           sseSource = new EventSource("/chat/stream");
         }
       }, 3000);
@@ -451,7 +469,7 @@
     return () => {
       console.log("Cleaning up SSE connection");
       if (sseSource) {
-        sseSource.close();
+        try { sseSource.close(); } catch {}
         sseSource = null;
       }
     };
@@ -582,6 +600,7 @@
           ...msg,
           message_type: msg.message_type || "text",
           fromSelf: msg.sender_id === data.user.id,
+          clientTimestamp: msg.sender_id === myId ? (sentMessageTimes.get(msg.id) ?? undefined) : undefined,
         }));
 
         // Track all server messages
@@ -646,22 +665,27 @@
       const result = await response.json();
       
       if (result.success) {
-        // Message sent successfully
-        // Mark this ID so we don't add it again from polling
+        // Mark IDs to avoid duplicates via polling/SSE
         processedMessageIds.add(result.id);
         sentMessageIds.add(result.id);
-        
-        // Replace temp message with real one from server
-        // Polling will pick it up, or we can replace it now
-        setTimeout(() => {
-          // Remove temp message after a delay - polling will add the real one
-          mes = mes.filter(m => m.id !== tempId);
-          allMessages = allMessages.filter(m => m.id !== tempId);
-          // Trigger a refresh to get the real message
-          if (select && select.id === receiverId) {
-            loadMessages(receiverId);
-          }
-        }, 500);
+        // Preserve client-side ordering for this message id
+        sentMessageTimes.set(result.id, currentClientTimestamp);
+
+        // Build real message using server-created timestamp
+        const realMessage: Mess = {
+          id: result.id,
+          sender_id: myId,
+          receiver_id: receiverId,
+          content: messageContent,
+          message_type: "text",
+          created_at: result.created_at ? new Date(result.created_at) : new Date(),
+          fromSelf: true,
+          clientTimestamp: currentClientTimestamp,
+        };
+
+        // Replace optimistic message in-place
+        mes = mes.map(m => (m.id === tempId ? realMessage : m));
+        allMessages = allMessages.map(m => (m.id === tempId ? realMessage : m));
       } else {
         console.error("Failed to send message", result.message);
         // Remove optimistic message on failure
@@ -858,18 +882,28 @@
       const result = await response.json();
 
       if (result.success) {
-        // Mark this ID so we don't add it again from polling
+        // Mark to avoid duplicates
         processedMessageIds.add(result.id);
         sentMessageIds.add(result.id);
-        
-        // Replace temp message with real one
-        setTimeout(() => {
-          mes = mes.filter(m => m.id !== tempId);
-          allMessages = allMessages.filter(m => m.id !== tempId);
-          if (select && select.id === receiverId) {
-            loadMessages(receiverId);
-          }
-        }, 500);
+        // Preserve client-side ordering for this image id
+        sentMessageTimes.set(result.id, currentClientTimestamp);
+
+        // Build real image message
+        const realMessage: Mess = {
+          id: result.id,
+          sender_id: myId,
+          receiver_id: receiverId,
+          content: fileToUpload.name,
+          message_type: "image",
+          file_path: result.file_path ?? undefined,
+          created_at: result.created_at ? new Date(result.created_at) : new Date(),
+          fromSelf: true,
+          clientTimestamp: currentClientTimestamp,
+        };
+
+        // Replace optimistic with real
+        mes = mes.map(m => (m.id === tempId ? realMessage : m));
+        allMessages = allMessages.map(m => (m.id === tempId ? realMessage : m));
       } else {
         console.error("Failed to upload image:", result.error);
         // Remove optimistic message on failure
@@ -1011,9 +1045,10 @@
 
     {#if showNotifications}
       <div
-        class="absolute top-16 right-0 z-50 w-full md:w-96 max-h-96 overflow-y-auto rounded-xl shadow-md bg-[#0073B1]/10 border border-[#0073B1]"
-        data-notification-dropdown
-      >
+  class="absolute top-16 right-0 z-50 w-full md:w-96 max-h-96 overflow-y-auto rounded-xl shadow-md bg-[#E6F2FB] border border-[#0073B1]"
+  data-notification-dropdown
+>
+
         <div class="p-4 border-b border-[#0073B1]">
           <h3 class="font-semibold text-[#0073B1]">Notifications</h3>
         </div>

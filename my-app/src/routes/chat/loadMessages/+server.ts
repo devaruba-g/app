@@ -13,7 +13,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     }
 
     const [rows] = await db.execute<RowDataPacket[]>(
-      'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY created_at ASC',
+      'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY id ASC',
       [myId, otherUserId, otherUserId, myId]
     );
 

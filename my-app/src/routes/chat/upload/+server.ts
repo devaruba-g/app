@@ -77,7 +77,8 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     return new Response(JSON.stringify({
       success: true,
       id: insertedId,
-      file_path: base64DataUrl
+      file_path: base64DataUrl,
+      created_at: message.created_at
     }), {
       headers: { 'Content-Type': 'application/json' }
     });

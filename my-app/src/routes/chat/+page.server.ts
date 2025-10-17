@@ -36,7 +36,7 @@ export let load: PageServerLoad = async ({ locals, url }) => {
   let messages: ChatMessage[] = [];
   try {
     let [messageRows] = await db.execute<ChatMessage[]>(
-      'SELECT * FROM chat WHERE sender_id=? OR receiver_id=? ORDER BY created_at ASC',
+      'SELECT * FROM chat WHERE sender_id=? OR receiver_id=? ORDER BY id ASC',
       [locals.user.id, locals.user.id]
     );
     messages = messageRows;
@@ -56,7 +56,7 @@ export let actions: Actions = {
       let me = locals.user?.id;
       if (!me || !otherUserId) return { messages: [] };
       let [rows] = await db.execute<ChatMessage[]>(
-        'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY created_at ASC',
+        'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY id ASC',
         [me, otherUserId, otherUserId, me]
       );
       return { messages: rows };
