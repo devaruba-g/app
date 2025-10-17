@@ -48,7 +48,12 @@ export const GET: RequestHandler = async ({ locals }) => {
       unseenMessages: unseenCounts,
       messagesBySender 
     }), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
     });
   } catch (error) {
     console.error('Error loading notification counts:', error);

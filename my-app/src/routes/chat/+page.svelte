@@ -229,13 +229,13 @@
     return () => clearInterval(intervalId);
   });
 
-  // Polling fallback: Check for new messages every 3 seconds
-  // This ensures messages appear even if SSE fails or users are on different server instances
+  // Aggressive polling: Check for new messages every 1.5 seconds
+  // This is the primary mechanism for real-time updates on Vercel (SSE doesn't work reliably)
   $effect(() => {
     if (!select) return;
     
     let consecutiveErrors = 0;
-    const maxErrors = 3;
+    const maxErrors = 5;
     
     const checkForNewMessages = async () => {
       if (!select || isLoadingMessages) return;
@@ -246,7 +246,7 @@
         formData.append("_t", Date.now().toString()); // Cache buster for Vercel
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
         
         const response = await fetch("/chat/loadMessages", {
           method: "POST",
@@ -254,7 +254,9 @@
           cache: "no-store",
           credentials: "include",
           headers: {
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
           },
           signal: controller.signal
         });
@@ -326,8 +328,8 @@
     // Initial check immediately
     checkForNewMessages();
     
-    // Poll every 3 seconds
-    const intervalId = setInterval(checkForNewMessages, 3000);
+    // Poll every 1.5 seconds for real-time feel
+    const intervalId = setInterval(checkForNewMessages, 1500);
 
     return () => clearInterval(intervalId);
   });
@@ -341,126 +343,66 @@
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   });
+  // Poll for notifications every 2 seconds
   $effect(() => {
     const intervalId = setInterval(async () => {
       try {
         const res = await fetch("/chat/notifications", {
           credentials: "include",
+          cache: "no-store",
+          headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+          }
         });
         const data = await res.json();
+        
+        // Check for new messages in notifications and add to global map
+        if (data.messagesBySender) {
+          Object.entries(data.messagesBySender).forEach(([senderId, messages]: [string, any]) => {
+            if (Array.isArray(messages)) {
+              messages.forEach((msg: any) => {
+                if (msg.id && !globalMessagesMap.has(msg.id)) {
+                  const newMsg: Mess = {
+                    id: msg.id,
+                    sender_id: senderId,
+                    receiver_id: myId,
+                    content: msg.content,
+                    message_type: msg.message_type || "text",
+                    file_path: msg.file_path,
+                    created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
+                    fromSelf: false,
+                  };
+                  globalMessagesMap.set(msg.id, newMsg);
+                }
+              });
+            }
+          });
+          if (Object.keys(data.messagesBySender).length > 0) {
+            globalMessagesMap = new Map(globalMessagesMap);
+            messageUpdateTrigger++;
+          }
+        }
+        
         unseenMessages = data.unseenMessages;
         messagesBySender = data.messagesBySender;
         updateTotalNotificationCount();
       } catch (e) {
         console.error("Polling error:", e);
       }
-    }, 3000);
+    }, 2000);
 
     return () => clearInterval(intervalId);
   });
 
+  // SSE is disabled for Vercel compatibility - polling handles all real-time updates
+  // Vercel's serverless functions timeout after 10-60 seconds, making SSE unreliable
   let sseInitialized = false;
   onMount(() => {
-    if (sseInitialized) return;
-    sseInitialized = true;
-
-    sseSource = new EventSource("/chat/stream");
-
-    sseSource.onopen = () => {
-      console.log("SSE connection opened successfully");
-    };
-
-    sseSource.onerror = (error) => {
-      console.error("SSE connection error:", error);
-
-      setTimeout(() => {
-        if (sseSource) {
-          try { sseSource.close(); } catch {}
-          sseSource = new EventSource("/chat/stream");
-        }
-      }, 3000);
-    };
-
-    sseSource.onmessage = (ev: MessageEvent) => {
-      try {
-        const payload = JSON.parse(ev.data);
-        
-        // Server now filters out our own messages, so we should only receive messages from others
-        // This simplifies the logic significantly
-        
-        // Prevent duplicate SSE processing
-        const now = Date.now();
-        const lastProcessed = recentlyProcessedSSE.get(payload.id);
-        if (lastProcessed && (now - lastProcessed) < 2000) {
-          console.log(`[SSE SKIP] Duplicate message ${payload.id} within 2 seconds`);
-          return;
-        }
-        recentlyProcessedSSE.set(payload.id, now);
-        
-        // Clean up old entries
-        for (const [id, timestamp] of recentlyProcessedSSE.entries()) {
-          if (now - timestamp > 5000) {
-            recentlyProcessedSSE.delete(id);
-          }
-        }
-
-        // Handle notifications if no chat is selected
-        if (!select) {
-          handleNotificationMessage(payload);
-          return;
-        }
-
-        // Check if this message is for the active chat
-        const isForActiveChat =
-          (payload.sender_id === select.id && payload.receiver_id === myId);
-
-        if (isForActiveChat) {
-          // Prevent duplicate processing
-          if (processedMessageIds.has(payload.id)) {
-            return;
-          }
-          
-          // Check if message already exists
-          if (messagesMap.has(payload.id)) {
-            return;
-          }
-          
-          processedMessageIds.add(payload.id);
-          
-          const newMessage: Mess = {
-            id: payload.id,
-            sender_id: payload.sender_id,
-            receiver_id: payload.receiver_id,
-            content: payload.content,
-            message_type: payload.message_type || "text",
-            file_path: payload.file_path,
-            created_at: payload.created_at ? new Date(payload.created_at) : new Date(),
-            fromSelf: false,
-          };
-          
-          messagesMap.set(payload.id, newMessage);
-          messagesMap = new Map(messagesMap); // Trigger reactivity
-          messageUpdateTrigger++;
-          
-          // Also add to global messages for chat history
-          globalMessagesMap.set(payload.id, newMessage);
-          globalMessagesMap = new Map(globalMessagesMap);
-          
-          markMessageAsSeenImmediately(payload.id, payload.sender_id);
-        } else {
-          handleNotificationMessage(payload);
-        }
-      } catch (error) {
-        console.error("Error parsing SSE message:", error);
-      }
-    };
-
+    // SSE disabled - using polling only for Vercel
+    console.log("[REALTIME] Using polling-only mode (SSE disabled for Vercel compatibility)");
+    
     return () => {
-      console.log("Cleaning up SSE connection");
-      if (sseSource) {
-        try { sseSource.close(); } catch {}
-        sseSource = null;
-      }
+      console.log("[REALTIME] Cleanup");
     };
   });
 
@@ -468,7 +410,6 @@
     if (payload.receiver_id === myId && payload.sender_id !== myId) {
       const isActivelyChatting = select && select.id === payload.sender_id;
 
-      // Add to global messages for chat history (even if not actively chatting)
       if (!globalMessagesMap.has(payload.id)) {
         const globalMessage: Mess = {
           id: payload.id,
@@ -530,7 +471,7 @@
         created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
       }));
       
-      // Initialize global messages map with all messages
+
       formatted.forEach((msg: Mess) => {
         globalMessagesMap.set(msg.id, msg);
         processedMessageIds.add(msg.id);
@@ -544,7 +485,7 @@
             msg.receiver_id === data.selectedUserId,
         );
         
-        // Initialize messagesMap with selected user's messages
+
         messagesMap.clear();
         selectedMessages.forEach((msg: Mess) => {
           messagesMap.set(msg.id, msg);
@@ -562,10 +503,10 @@
     if (select && select.id === selectedUser.id) return;
     select = selectedUser;
     currentSelectedId = selectedUser.id;
-    messagesMap.clear(); // Clear the map
-    messageUpdateTrigger++; // Force reactivity
+    messagesMap.clear();
+    messageUpdateTrigger++; 
     processedMessageIds.clear(); 
-    lastPolledMessageId = 0; // Reset polling tracker
+    lastPolledMessageId = 0;
     loadingMessages = true;
 
     if (
@@ -617,30 +558,24 @@
           created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
         }));
 
-        // Clear and rebuild the map with server messages
         const optimisticMessages = Array.from(messagesMap.values()).filter(m => m.id < 0);
         messagesMap.clear();
         
-        // Add optimistic messages back
         optimisticMessages.forEach(msg => messagesMap.set(msg.id, msg));
         
-        // Add server messages
         serverMessages.forEach((msg: Mess) => {
           if (msg.id > 0) {
             messagesMap.set(msg.id, msg);
             processedMessageIds.add(msg.id);
             
-            // Also add to global messages for chat history
             globalMessagesMap.set(msg.id, msg);
           }
         });
         
-        // Create new reference to trigger reactivity
         messagesMap = new Map(messagesMap);
         globalMessagesMap = new Map(globalMessagesMap);
         messageUpdateTrigger++;
         
-        // Initialize lastPolledMessageId to prevent re-adding old messages
         if (serverMessages.length > 0) {
           const maxId = Math.max(...serverMessages.filter(m => m.id > 0).map(m => m.id));
           lastPolledMessageId = maxId;
@@ -659,7 +594,6 @@
     const receiverId = select.id;
     input = "";
 
-    // Create optimistic message with temporary negative ID
     const tempId = -(Date.now());
     const currentClientTimestamp = Date.now();
     
@@ -674,9 +608,9 @@
       clientTimestamp: currentClientTimestamp,
     };
     
-    // Add optimistic message to UI immediately
+
     messagesMap.set(tempId, optimisticMessage);
-    messagesMap = new Map(messagesMap); // Trigger reactivity
+    messagesMap = new Map(messagesMap); 
     messageUpdateTrigger++;
 
     try {
