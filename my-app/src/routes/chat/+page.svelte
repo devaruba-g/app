@@ -33,13 +33,13 @@
     file_path?: string;
     created_at: Date;
     fromSelf: boolean;
-    clientTimestamp?: number; // For optimistic messages
+    clientTimestamp?: number; 
   }
   let users = $state<User[]>(data.users || []);
   let select = $state<User | null>(null);
-  let messagesMap = $state<Map<number, Mess>>(new Map()); // Use Map for efficient deduplication
-  let messageUpdateTrigger = $state(0); // Trigger to force reactivity
-  let globalMessagesMap = $state<Map<number, Mess>>(new Map()); // Store ALL messages from ALL conversations
+  let messagesMap = $state<Map<number, Mess>>(new Map()); 
+  let messageUpdateTrigger = $state(0); 
+  let globalMessagesMap = $state<Map<number, Mess>>(new Map()); 
   let input = $state("");
   let notificationCount = $state(0);
   let showNotifications = $state(false);
@@ -54,42 +54,37 @@
   let showImageModal = $state(false);
   let modalImageSrc = $state<string | null>(null);
   let processedMessageIds = $state<Set<number>>(new Set());
-  let recentlyProcessedSSE = $state<Map<number, number>>(new Map()); // Track recent SSE messages with timestamp
-  let lastPolledMessageId = $state<number>(0); // Track last message ID from polling to avoid redundant checks
+  let recentlyProcessedSSE = $state<Map<number, number>>(new Map());
+  let lastPolledMessageId = $state<number>(0); 
   
-  // Derived state: all messages across all conversations for chat history
   let allMessages = $derived.by(() => {
-    messageUpdateTrigger; // Force reactivity
+    messageUpdateTrigger; 
     return Array.from(globalMessagesMap.values());
   });
 
-  // Derived state: messages sorted by ID (server order) with optimistic messages at the end
+
   let uniqueMessages = $derived.by(() => {
-    // Force reactivity by reading the trigger
+ 
     messageUpdateTrigger;
     
     const messages = Array.from(messagesMap.values());
     
-    // Sort messages:
-    // 1. Persisted messages (id > 0) sorted by ID ascending (server insertion order)
-    // 2. Optimistic messages (id < 0) sorted by their timestamp at the end
+ 
     return messages.sort((a, b) => {
       const aReal = a.id > 0;
       const bReal = b.id > 0;
       
-      // Both are real messages - sort by ID (server order)
+   
       if (aReal && bReal) {
         return a.id - b.id;
       }
-      
-      // Both are optimistic - sort by clientTimestamp or ID
+
       if (!aReal && !bReal) {
         const aTime = a.clientTimestamp ?? Math.abs(a.id);
         const bTime = b.clientTimestamp ?? Math.abs(b.id);
         return aTime - bTime;
       }
-      
-      // Real messages come before optimistic
+
       return aReal ? -1 : 1;
     });
   });
@@ -229,8 +224,7 @@
     return () => clearInterval(intervalId);
   });
 
-  // Aggressive polling: Check for new messages every 1.5 seconds
-  // This is the primary mechanism for real-time updates on Vercel (SSE doesn't work reliably)
+
   $effect(() => {
     if (!select) return;
     
@@ -243,10 +237,10 @@
       try {
         const formData = new FormData();
         formData.append("user_id", select.id);
-        formData.append("_t", Date.now().toString()); // Cache buster for Vercel
+        formData.append("_t", Date.now().toString()); 
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 8000); 
         
         const response = await fetch("/chat/loadMessages", {
           method: "POST",
@@ -268,7 +262,7 @@
         }
         
         const result = await response.json();
-        consecutiveErrors = 0; // Reset error count on success
+        consecutiveErrors = 0; 
 
         if (result.messages && select) {
           const serverMessages: Mess[] = result.messages.map((msg: any) => ({
@@ -280,29 +274,32 @@
 
           let hasNewMessages = false;
           
-          // Add or update messages in the map
+        
           serverMessages.forEach((msg: Mess) => {
             if (msg.id > 0) {
-              // Only add if we don't have this message yet
-              if (!messagesMap.has(msg.id)) {
+           
+              if (!messagesMap.has(msg.id) && !processedMessageIds.has(msg.id)) {
                 messagesMap.set(msg.id, msg);
                 hasNewMessages = true;
                 
-                // Update tracking
+      
                 processedMessageIds.add(msg.id);
                 if (msg.id > lastPolledMessageId) {
                   lastPolledMessageId = msg.id;
                 }
+                console.log('[POLLING] New message added:', msg.id, msg.message_type);
+              } else if (processedMessageIds.has(msg.id)) {
+                console.log('[POLLING] Message already processed, skipping:', msg.id);
               }
             }
           });
 
-          // If we have new messages, trigger reactivity
+   
           if (hasNewMessages) {
-            messagesMap = new Map(messagesMap); // Create new reference
-            messageUpdateTrigger++; // Force derived update
+            messagesMap = new Map(messagesMap); 
+            messageUpdateTrigger++; 
             
-            // Also update global messages map for chat history
+          
             serverMessages.forEach((msg: Mess) => {
               if (msg.id > 0 && !globalMessagesMap.has(msg.id)) {
                 globalMessagesMap.set(msg.id, msg);
@@ -315,20 +312,20 @@
         consecutiveErrors++;
         console.error(`[POLLING ERROR ${consecutiveErrors}/${maxErrors}]:`, error);
         
-        // If too many consecutive errors, stop polling temporarily
+      
         if (consecutiveErrors >= maxErrors) {
           console.warn("[POLLING] Too many errors, will retry in 10 seconds");
           setTimeout(() => {
-            consecutiveErrors = 0; // Reset after cooldown
+            consecutiveErrors = 0;
           }, 10000);
         }
       }
     };
 
-    // Initial check immediately
+
     checkForNewMessages();
     
-    // Poll every 1.5 seconds for real-time feel
+ 
     const intervalId = setInterval(checkForNewMessages, 1500);
 
     return () => clearInterval(intervalId);
@@ -343,7 +340,7 @@
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   });
-  // Poll for notifications every 2 seconds
+ 
   $effect(() => {
     const intervalId = setInterval(async () => {
       try {
@@ -356,7 +353,7 @@
         });
         const data = await res.json();
         
-        // Check for new messages in notifications and add to global map
+     
         if (data.messagesBySender) {
           Object.entries(data.messagesBySender).forEach(([senderId, messages]: [string, any]) => {
             if (Array.isArray(messages)) {
@@ -394,11 +391,10 @@
     return () => clearInterval(intervalId);
   });
 
-  // SSE is disabled for Vercel compatibility - polling handles all real-time updates
-  // Vercel's serverless functions timeout after 10-60 seconds, making SSE unreliable
+
   let sseInitialized = false;
   onMount(() => {
-    // SSE disabled - using polling only for Vercel
+
     console.log("[REALTIME] Using polling-only mode (SSE disabled for Vercel compatibility)");
     
     return () => {
@@ -625,10 +621,10 @@
       const result = await response.json();
       
       if (result.success) {
-        // Mark IDs to avoid duplicates via polling/SSE
+    
         processedMessageIds.add(result.id);
 
-        // Build real message using server-created timestamp
+   
         const realMessage: Mess = {
           id: result.id,
           sender_id: myId,
@@ -639,25 +635,25 @@
           fromSelf: true,
         };
 
-        // Replace optimistic message with real one
+   
         messagesMap.delete(tempId);
         messagesMap.set(result.id, realMessage);
-        messagesMap = new Map(messagesMap); // Trigger reactivity
+        messagesMap = new Map(messagesMap); 
         messageUpdateTrigger++;
         
-        // Update global messages
+       
         globalMessagesMap.set(result.id, realMessage);
         globalMessagesMap = new Map(globalMessagesMap);
       } else {
         console.error("Failed to send message", result.message);
-        // Remove optimistic message on failure
+     
         messagesMap.delete(tempId);
         messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
       }
     } catch (error) {
       console.error("Error saving message:", error);
-      // Remove optimistic message on error
+    
       messagesMap.delete(tempId);
       messagesMap = new Map(messagesMap);
       messageUpdateTrigger++;
@@ -810,9 +806,9 @@
     isUploading = true;
     const fileToUpload = selectedFile;
     const receiverId = select.id;
-    selectedFile = null; // Clear immediately
+    selectedFile = null; 
 
-    // Create optimistic message
+  
     const tempId = -(Date.now());
     const currentClientTimestamp = Date.now();
     
@@ -822,16 +818,17 @@
       receiver_id: receiverId,
       content: fileToUpload.name,
       message_type: "image",
-      file_path: URL.createObjectURL(fileToUpload), // Temporary preview
+      file_path: URL.createObjectURL(fileToUpload),
       created_at: new Date(),
       fromSelf: true,
       clientTimestamp: currentClientTimestamp,
     };
     
-    // Add optimistic message to UI
+ 
     messagesMap.set(tempId, optimisticMessage);
-    messagesMap = new Map(messagesMap); // Trigger reactivity
+    messagesMap = new Map(messagesMap); 
     messageUpdateTrigger++;
+    console.log('[IMAGE] Optimistic message added:', tempId);
 
     try {
       const formData = new FormData();
@@ -847,10 +844,12 @@
       const result = await response.json();
 
       if (result.success) {
-        // Mark to avoid duplicates
+        console.log('[IMAGE] Upload successful, ID:', result.id);
+        
+  
         processedMessageIds.add(result.id);
 
-        // Build real image message
+     
         const realMessage: Mess = {
           id: result.id,
           sender_id: myId,
@@ -862,25 +861,40 @@
           fromSelf: true,
         };
 
-        // Replace optimistic with real
-        messagesMap.delete(tempId);
-        messagesMap.set(result.id, realMessage);
-        messagesMap = new Map(messagesMap); // Trigger reactivity
+        if (messagesMap.has(tempId)) {
+          messagesMap.delete(tempId);
+          console.log('[IMAGE] Removed optimistic message:', tempId);
+        }
+        
+     
+        if (!messagesMap.has(result.id)) {
+          messagesMap.set(result.id, realMessage);
+          console.log('[IMAGE] Added real message:', result.id);
+        } else {
+          console.log('[IMAGE] Real message already exists, skipping:', result.id);
+        }
+        
+        messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
         
-        // Update global messages
-        globalMessagesMap.set(result.id, realMessage);
-        globalMessagesMap = new Map(globalMessagesMap);
+     
+        if (!globalMessagesMap.has(result.id)) {
+          globalMessagesMap.set(result.id, realMessage);
+          globalMessagesMap = new Map(globalMessagesMap);
+          console.log('[IMAGE] Added to global messages:', result.id);
+        } else {
+          console.log('[IMAGE] Already in global messages:', result.id);
+        }
       } else {
         console.error("Failed to upload image:", result.error);
-        // Remove optimistic message on failure
+    
         messagesMap.delete(tempId);
         messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
       }
     } catch (error) {
       console.error("Error uploading image:", error);
-      // Remove optimistic message on error
+
       messagesMap.delete(tempId);
       messagesMap = new Map(messagesMap);
       messageUpdateTrigger++;
@@ -900,6 +914,9 @@
       console.log("File name:", file.name);
       console.log("File size:", file.size);
       console.log("File type:", file.type);
+      
+
+      target.value = '';
     } else {
       console.log("No file selected");
     }
