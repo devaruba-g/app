@@ -57,7 +57,8 @@
   let recentlyProcessedSSE = $state<Map<number, number>>(new Map());
   let lastPolledMessageId = $state<number>(0);
   let isUpdatingMessages = $state(false);
-  let pendingOperations = $state<Set<string>>(new Set()); 
+  let pendingOperations = $state<Set<string>>(new Set());
+  let optimisticMessages = $state<Map<number, number>>(new Map()); // temp ID -> real ID mapping 
   
   let allMessages = $derived.by(() => {
     messageUpdateTrigger; 
@@ -70,8 +71,17 @@
     
     const messages = Array.from(messagesMap.values());
     
-    // Sort messages: real messages by ID, optimistic by timestamp, optimistic before real
-    return messages.sort((a, b) => {
+    // Filter out optimistic messages that have been replaced
+    const filteredMessages = messages.filter(msg => {
+      if (msg.id < 0) {
+        // Check if this optimistic message has been replaced
+        return !optimisticMessages.has(msg.id);
+      }
+      return true;
+    });
+    
+    // Sort messages chronologically
+    return filteredMessages.sort((a, b) => {
       const aReal = a.id > 0;
       const bReal = b.id > 0;
       
@@ -292,12 +302,17 @@
                 (msg.sender_id === myId && msg.receiver_id === select.id) ||
                 (msg.sender_id === select.id && msg.receiver_id === myId);
               
+              if (!isRelevant) return;
+              
               // Strict deduplication: check all sources
               const alreadyExists = messagesMap.has(msg.id) || 
                                    processedMessageIds.has(msg.id) ||
                                    globalMessagesMap.has(msg.id);
               
-              if (isRelevant && !alreadyExists) {
+              // Also check if this is an optimistic message being replaced
+              const isBeingReplaced = Array.from(optimisticMessages.values()).includes(msg.id);
+              
+              if (!alreadyExists && !isBeingReplaced) {
                 newMessages.push(msg);
                 hasNewMessages = true;
                 processedMessageIds.add(msg.id);
@@ -306,6 +321,8 @@
                   lastPolledMessageId = msg.id;
                 }
                 console.log('[POLLING] New message:', msg.id, msg.message_type);
+              } else if (isBeingReplaced) {
+                console.log('[POLLING] Message being replaced by optimistic update, skipping:', msg.id);
               }
             }
           });
@@ -382,7 +399,10 @@
                                      messagesMap.has(msg.id) ||
                                      processedMessageIds.has(msg.id);
                 
-                if (msg.id && !alreadyExists) {
+                // Check if being replaced by optimistic update
+                const isBeingReplaced = Array.from(optimisticMessages.values()).includes(msg.id);
+                
+                if (msg.id && !alreadyExists && !isBeingReplaced) {
                   const newMsg: Mess = {
                     id: msg.id,
                     sender_id: senderId,
@@ -396,6 +416,8 @@
                   globalMessagesMap.set(msg.id, newMsg);
                   processedMessageIds.add(msg.id);
                   hasNewNotifications = true;
+                } else if (isBeingReplaced) {
+                  console.log('[NOTIFICATIONS] Message being replaced, skipping:', msg.id);
                 }
               });
             }
@@ -528,7 +550,9 @@
     currentSelectedId = selectedUser.id;
     messagesMap.clear();
     messageUpdateTrigger++; 
-    processedMessageIds.clear(); 
+    // Don't clear processedMessageIds - keep global deduplication
+    // processedMessageIds.clear(); 
+    optimisticMessages.clear(); // Clear optimistic mappings for new chat
     lastPolledMessageId = 0;
     loadingMessages = true;
 
@@ -668,10 +692,21 @@
           fromSelf: true,
         };
 
-        // Atomic update: remove temp, add real
-        messagesMap.delete(tempId);
+        // Mark optimistic message as replaced
+        optimisticMessages.set(tempId, result.id);
+        
+        // Add real message (keep optimistic for smooth transition)
         messagesMap.set(result.id, realMessage);
         globalMessagesMap.set(result.id, realMessage);
+        
+        // Remove optimistic after a brief delay for smooth transition
+        setTimeout(() => {
+          if (messagesMap.has(tempId)) {
+            messagesMap.delete(tempId);
+            messagesMap = new Map(messagesMap);
+            messageUpdateTrigger++;
+          }
+        }, 150);
         
         messagesMap = new Map(messagesMap);
         globalMessagesMap = new Map(globalMessagesMap);
@@ -680,6 +715,7 @@
         pendingOperations.delete(operationId);
       } else {
         console.error("Failed to send message", result.message);
+        optimisticMessages.delete(tempId);
         messagesMap.delete(tempId);
         messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
@@ -687,6 +723,7 @@
       }
     } catch (error) {
       console.error("Error saving message:", error);
+      optimisticMessages.delete(tempId);
       messagesMap.delete(tempId);
       messagesMap = new Map(messagesMap);
       messageUpdateTrigger++;
@@ -895,10 +932,21 @@
           fromSelf: true,
         };
 
-        // Atomic update: remove temp, add real to both maps
-        messagesMap.delete(tempId);
+        // Mark optimistic message as replaced
+        optimisticMessages.set(tempId, result.id);
+        
+        // Add real message (keep optimistic for smooth transition)
         messagesMap.set(result.id, realMessage);
         globalMessagesMap.set(result.id, realMessage);
+        
+        // Remove optimistic after a brief delay for smooth transition
+        setTimeout(() => {
+          if (messagesMap.has(tempId)) {
+            messagesMap.delete(tempId);
+            messagesMap = new Map(messagesMap);
+            messageUpdateTrigger++;
+          }
+        }, 150);
         
         messagesMap = new Map(messagesMap);
         globalMessagesMap = new Map(globalMessagesMap);
@@ -908,6 +956,7 @@
         pendingOperations.delete(operationId);
       } else {
         console.error("Failed to upload image:", result.error);
+        optimisticMessages.delete(tempId);
         messagesMap.delete(tempId);
         messagesMap = new Map(messagesMap);
         messageUpdateTrigger++;
@@ -915,6 +964,7 @@
       }
     } catch (error) {
       console.error("Error uploading image:", error);
+      optimisticMessages.delete(tempId);
       messagesMap.delete(tempId);
       messagesMap = new Map(messagesMap);
       messageUpdateTrigger++;
