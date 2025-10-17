@@ -276,9 +276,12 @@
           
         
           serverMessages.forEach((msg: Mess) => {
-            if (msg.id > 0) {
-           
-              if (!messagesMap.has(msg.id) && !processedMessageIds.has(msg.id)) {
+            if (msg.id > 0 && select) {
+              const isRelevant = 
+                (msg.sender_id === myId && msg.receiver_id === select.id) ||
+                (msg.sender_id === select.id && msg.receiver_id === myId);
+              
+              if (isRelevant && !messagesMap.has(msg.id) && !processedMessageIds.has(msg.id)) {
                 messagesMap.set(msg.id, msg);
                 hasNewMessages = true;
                 
@@ -290,6 +293,8 @@
                 console.log('[POLLING] New message added:', msg.id, msg.message_type);
               } else if (processedMessageIds.has(msg.id)) {
                 console.log('[POLLING] Message already processed, skipping:', msg.id);
+              } else if (!isRelevant) {
+                console.log('[POLLING] Message not relevant to current chat, skipping:', msg.id);
               }
             }
           });
@@ -477,8 +482,8 @@
       if (data.selectedUserId) {
         const selectedMessages = formatted.filter(
           (msg) =>
-            msg.sender_id === data.selectedUserId ||
-            msg.receiver_id === data.selectedUserId,
+            (msg.sender_id === myId && msg.receiver_id === data.selectedUserId) ||
+            (msg.sender_id === data.selectedUserId && msg.receiver_id === myId)
         );
         
 
@@ -554,17 +559,22 @@
           created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
         }));
 
-        const optimisticMessages = Array.from(messagesMap.values()).filter(m => m.id < 0);
+  
         messagesMap.clear();
         
-        optimisticMessages.forEach(msg => messagesMap.set(msg.id, msg));
-        
+      
         serverMessages.forEach((msg: Mess) => {
           if (msg.id > 0) {
-            messagesMap.set(msg.id, msg);
-            processedMessageIds.add(msg.id);
+        
+            const isRelevant = 
+              (msg.sender_id === myId && msg.receiver_id === userId) ||
+              (msg.sender_id === userId && msg.receiver_id === myId);
             
-            globalMessagesMap.set(msg.id, msg);
+            if (isRelevant) {
+              messagesMap.set(msg.id, msg);
+              processedMessageIds.add(msg.id);
+              globalMessagesMap.set(msg.id, msg);
+            }
           }
         });
         

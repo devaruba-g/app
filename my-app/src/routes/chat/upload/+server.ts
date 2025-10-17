@@ -52,7 +52,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 
     const insertedId = (result as any).insertId;
 
-    // Fetch the message with actual database timestamp
+
     const [rows] = await db.execute<any[]>(
       'SELECT * FROM chat WHERE id = ?',
       [insertedId]
@@ -71,7 +71,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
         file_path: base64DataUrl,
         created_at: message.created_at
       },
-      excludeUserId: sender_id // Don't send back to sender
+      excludeUserId: sender_id 
     });
 
     return new Response(JSON.stringify({
