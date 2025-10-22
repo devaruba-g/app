@@ -2,6 +2,8 @@ import type { RequestHandler } from '@sveltejs/kit';
 import { getUnseenMessagesWithSenders, markMessageAsSeenById, markAllMessagesAsSeenFromSender } from '$lib/db/queries';
 import type { NotificationMessage } from '$lib/types';
 
+// Load unseen message counts and mark messages as seen
+
 export const GET: RequestHandler = async ({ locals }) => {
   if (!locals.user) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -10,7 +12,7 @@ export const GET: RequestHandler = async ({ locals }) => {
     });
   }
 
-  try {
+  try {// Fetch unseen messages grouped by sender
     const rows = await getUnseenMessagesWithSenders(locals.user.id);
 
     const messagesBySender: {[userId: string]: NotificationMessage[]} = {};
@@ -51,6 +53,8 @@ export const GET: RequestHandler = async ({ locals }) => {
     });
   }
 };
+
+// Mark messages as seen endpoint
 
 export const POST: RequestHandler = async ({ request, locals }) => {
   if (!locals.user) {

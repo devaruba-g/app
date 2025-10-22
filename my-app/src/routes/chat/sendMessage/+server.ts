@@ -2,6 +2,8 @@ import { publish } from '$lib/realtime';
 import type { RequestHandler } from '@sveltejs/kit';
 import { insertTextMessage, getMessageById } from '$lib/db/queries';
 
+// Send a text message from one user to another
+
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
     const form = await request.formData();

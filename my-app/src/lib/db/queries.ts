@@ -157,3 +157,36 @@ export async function getNewMessagesForUser(userId: string, lastId: number, limi
   );
   return rows;
 }
+
+
+// Password Reset Queries
+
+
+export async function createPasswordReset(id: string, userId: string, token: string, expiresAt: string) {
+  await db.query(
+    'INSERT INTO password_resets (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)',
+    [id, userId, token, expiresAt]
+  );
+}
+
+
+export async function getPasswordResetByToken(token: string) {
+  const [rows] = await db.query<RowDataPacket[]>(
+    `SELECT pr.id as reset_id, pr.expires_at, u.id as user_id
+     FROM password_resets pr
+     JOIN auth_user u ON u.id = pr.user_id
+     WHERE pr.token = ?
+     ORDER BY pr.expires_at DESC
+     LIMIT 1`,
+    [token]
+  );
+  return rows[0] || null;
+}
+
+export async function updateUserPassword(userId: string, hashedPassword: string) {
+  await db.query('UPDATE auth_user SET password = ? WHERE id = ?', [hashedPassword, userId]);
+}
+
+export async function deletePasswordReset(resetId: string) {
+  await db.query('DELETE FROM password_resets WHERE id = ?', [resetId]);
+}

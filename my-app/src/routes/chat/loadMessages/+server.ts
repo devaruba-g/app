@@ -1,6 +1,8 @@
 import type { RequestHandler } from '@sveltejs/kit';
 import { getMessagesBetweenUsers } from '$lib/db/queries';
 
+// Load chat messages between the logged-in user and another user
+
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
     const form = await request.formData();

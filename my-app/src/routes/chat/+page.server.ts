@@ -1,10 +1,13 @@
 import type { PageServerLoad, Actions } from './$types';
 import { redirect } from '@sveltejs/kit';
 import { getAllUsersExcept, getAllMessagesForUser, getMessagesBetweenUsers, type ChatMessageRow } from '$lib/db/queries';
+
+// Load chat page data including users and messages
+
 export let load: PageServerLoad = async ({ locals, url }) => {
   if (!locals.user)
     throw redirect(302, '/');
-  
+
   const rows = await getAllUsersExcept(locals.user.id);
 
   let users = rows.map(u => ({
@@ -25,6 +28,9 @@ export let load: PageServerLoad = async ({ locals, url }) => {
     user: locals.user, users, messages, selectedUserId
   };
 };
+
+// Define actions for loading messages and logging out
+
 export let actions: Actions = {
   loadMessages: async ({ request, locals }) => {
     try {

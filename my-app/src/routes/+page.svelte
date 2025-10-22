@@ -77,26 +77,24 @@
                 return async ({ result }) => {
                   loadingSignIn.set(false);
 
-            
                   if (result.type === "success") {
                     const res = result.data as {
                       type?: string;
                       message?: string;
                       redirect?: string;
                     };
-                    form = res; 
+                    form = res;
                     if (res.redirect === "signin") {
-                      goto("/chat"); 
+                      goto("/chat");
                     }
                   }
 
-       
                   if (result.type === "failure") {
                     const res = result.data as {
                       type?: string;
                       message?: string;
                     };
-                    form = res; 
+                    form = res;
                   }
                 };
               }}
@@ -139,7 +137,6 @@
                 return async ({ result }) => {
                   loadingSignUp.set(false);
 
-               
                   if (result.type === "success") {
                     const res = result.data as {
                       type?: string;
@@ -149,13 +146,12 @@
                     form = res;
                   }
 
-                
                   if (result.type === "failure") {
                     const res = result.data as {
                       type?: string;
                       message?: string;
                     };
-                    form = res; 
+                    form = res;
                   }
                 };
               }}

@@ -19,6 +19,8 @@ type Listener = {
 
 const listeners = new Set<Listener>();
 
+// Subscribe to chat events
+
 export function subscribe(userId: string, callback: (event: ChatEvent) => void) {
   const listener: Listener = { userId, callback };
   listeners.add(listener);

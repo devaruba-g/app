@@ -4,16 +4,22 @@ import { fail, redirect } from '@sveltejs/kit';
 import { generateId } from 'lucia';
 import bcrypt from 'bcryptjs';
 import { getUserByEmail, createUser } from '$lib/db/queries';
+
+// Load page data and handle signup, signin, and logout actions
+
 export let load: PageServerLoad = async ({ locals }) => {
   return {
     user: locals.user
   };
 };
+
+// Define actions for signup, signin, and logout
+
 export let actions: Actions = {
   signup: async ({ request }) => {
     let form = await request.formData();
     let name = form.get('name') as string;
-    let email = form.get('email') as string;
+    let email = form.get('email') as string
     let password = form.get('password') as string;
     if (password.length < 8)
       return fail(400, { type: 'error', message: 'password must be greater than 7 characters' });

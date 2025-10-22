@@ -1,6 +1,8 @@
 import type { RequestHandler } from '@sveltejs/kit';
 import { markMessagesAsSeen } from '$lib/db/queries';
 
+// Mark messages as seen between two users
+
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
     const form = await request.formData();

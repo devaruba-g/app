@@ -1,6 +1,8 @@
 import type { RequestHandler } from '@sveltejs/kit';
 import { getOnlineUsers } from '$lib/db/queries';
 
+// Get list of online users
+
 export const GET: RequestHandler = async () => {
   const onlineUserIds = await getOnlineUsers();
 

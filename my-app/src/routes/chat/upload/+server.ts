@@ -2,6 +2,8 @@ import type { RequestHandler } from '@sveltejs/kit';
 import { publish } from '$lib/realtime';
 import { insertImageMessage, getMessageById } from '$lib/db/queries';
 
+// Handle image upload and send as a message
+
 export const POST: RequestHandler = async ({ request, locals }) => {
   if (!locals.user) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -50,7 +52,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     const message = await getMessageById(insertedId);
 
     
-    publish({
+    publish({// Notify other users of the new image message
       type: 'message',
       data: {
         id: insertedId,

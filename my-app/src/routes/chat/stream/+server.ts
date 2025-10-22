@@ -1,6 +1,8 @@
 import type { RequestHandler } from '@sveltejs/kit';
 import { getMaxMessageIdForUser, getNewMessagesForUser } from '$lib/db/queries';
 
+// Server-Sent Events endpoint for streaming new chat messages
+
 export const GET: RequestHandler = async ({ request, locals }) => {
   const userId = locals.user?.id;
   if (!userId) return new Response('Unauthorized', { status: 401 });
@@ -42,7 +44,7 @@ export const GET: RequestHandler = async ({ request, locals }) => {
       const pollIntervalMs = 1500;
       poller = setInterval(async () => {
         if (closed) return;
-        try {
+        try {// Fetch new messages for the user
           const messages = await getNewMessagesForUser(userId, lastId, 100);
           if (messages.length > 0) {
             for (const msg of messages) {
@@ -64,7 +66,7 @@ export const GET: RequestHandler = async ({ request, locals }) => {
         }
       }, pollIntervalMs);
 
-
+  
       request.signal.addEventListener('abort', () => {
         closed = true;
         if (heartbeat) clearInterval(heartbeat);

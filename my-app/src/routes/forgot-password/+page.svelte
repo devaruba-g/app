@@ -3,16 +3,10 @@
   import { Button } from "$lib/components/ui/button";
   import { toast, Toaster } from "svelte-sonner";
   import { enhance } from "$app/forms";
-
-  interface FormResult {
-    success?: boolean;
-    invalid?: boolean;
-    message?: string;
-  }
+  import type { FormResult } from "$lib/types";
 
   let loading = false;
   let formElement: HTMLFormElement;
-
 </script>
 
 <div class="min-h-screen flex items-center justify-center bg-gray-50 p-4">
@@ -39,7 +33,6 @@
       on:submit={() => (loading = true)}
       class="flex flex-col gap-4"
     >
-    
       <Input
         type="email"
         name="email"

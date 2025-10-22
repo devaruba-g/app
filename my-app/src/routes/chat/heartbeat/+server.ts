@@ -1,6 +1,8 @@
 import type { RequestHandler } from '@sveltejs/kit';
 import { updateUserLastActive } from '$lib/db/queries';
 
+// Heartbeat endpoint to update user's last active timestamp
+
 export const POST: RequestHandler = async ({ locals }) => {
   if (!locals.user) {
     return new Response('Unauthorized', { status: 401 });

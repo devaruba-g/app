@@ -16,6 +16,7 @@
   } from "$lib/components/ui/tabs";
   import type { PageData } from "./$types";
   import type { User, Mess, NotificationMessage, ServerMessage } from "$lib/types";
+  import { onMount } from "svelte";
   
   let { data }: { data: PageData } = $props();
   const myId = data.user.id;
@@ -33,26 +34,25 @@
   let selectedFile = $state<File | null>(null);
   let activeTab = $state<"chats" | "all-users">("chats");
   let loadingLogout = $state(false);
-  let chatUsers = $state<User[]>([]);
-  let allUsers = $state<User[]>([]);
   let showImageModal = $state(false);
   let modalImageSrc = $state<string | null>(null);
   let processedMessageIds = $state<Set<number>>(new Set());
   let lastPolledMessageId = $state<number>(0);
   let isSendingMessage = $state(false);
   let lastSendTime = $state(0); 
+
+  // Derived store for all messages
   
   let allMessages = $derived.by(() => {
     messageUpdateTrigger; 
     return Array.from(globalMessagesMap.values());
   });
 
+// Derived store for unique messages in the current chat
 
   let uniqueMessages = $derived.by(() => {
     messageUpdateTrigger;
     const messages = Array.from(messagesMap.values());
-    
-    // Simple chronological sort by ID
     return messages.sort((a, b) => a.id - b.id);
   });
 
@@ -66,6 +66,7 @@
     showImageModal = false;
   }
 
+  // Get users with whom there is chat history
 
   function getChatUsersWithHistory(): User[] {
     const usersWithMessages = new Set<string>();
@@ -80,8 +81,9 @@
     return users.filter((u) => usersWithMessages.has(u.id));
   }
 
-  $effect(() => {
-    allUsers = users.map((u) => ({
+  // Derived user lists - automatically updates when users or messages change
+  let allUsers = $derived.by(() => {
+    return users.map((u) => ({
       ...u,
       avatar:
         u.avatar ||
@@ -90,8 +92,10 @@
         )}&background=0073B1&color=ffffff&size=128`,
       isOnline: u.isOnline ?? false,
     }));
+  });
 
-    chatUsers = getChatUsersWithHistory().map((u) => ({
+  let chatUsers = $derived.by(() => {
+    return getChatUsersWithHistory().map((u) => ({
       ...u,
       avatar:
         u.avatar ||
@@ -113,42 +117,17 @@
 
   let sseSource: EventSource | null = null;
 
-  let currentSelectedId = $state<string | null>(null);
+  // Derived from select - no need for separate effect
+  let currentSelectedId = $derived(select?.id || null);
 
-  $effect(() => {
-    currentSelectedId = select?.id || null;
-  });
-
-  $effect(() => {
-    let intervalId: number | null = null;
-    if (currentSelectedId) {
-      const selectedUserId = currentSelectedId;
-      intervalId = window.setInterval(() => {
-        if (
-          unseenMessages[selectedUserId] &&
-          unseenMessages[selectedUserId] > 0
-        ) {
-          markMessagesAsSeen(selectedUserId);
-        }
-      }, 5000);
-    }
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
+  // Function to start marking messages as seen
+  function startMarkingMessagesAsSeen(userId: string) {
+    return setInterval(() => {
+      if (unseenMessages[userId] && unseenMessages[userId] > 0) {
+        markMessagesAsSeen(userId);
       }
-    };
-  });
-  import { onMount } from "svelte";
-
-  onMount(() => {
-    fetch("/chat/heartbeat", { method: "POST", credentials: "include" });
-
-    const interval = setInterval(() => {
-      fetch("/chat/heartbeat", { method: "POST", credentials: "include" });
-    }, 20000);
-
-    return () => clearInterval(interval);
-  });
+    }, 5000);
+  }
 
   let messagesContainer: HTMLDivElement | null = null;
 
@@ -157,219 +136,227 @@
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
   }
+  // Scroll effect - only when messages change
   $effect(() => {
     if (uniqueMessages.length > 0) {
       scrollToBottom();
     }
   });
 
-  $effect(() => {
-    const intervalId = setInterval(async () => {
-      try {
-        const res = await fetch("/chat/online-users", {
-          credentials: "include",
-        });
-        const data = await res.json();
-        const onlineUserIds = new Set(data.onlineUserIds);
+  // Polling functions
+  async function pollOnlineUsers() {
+    try {
+      const res = await fetch("/chat/online-users", {
+        credentials: "include",
+      });
+      const data = await res.json();
+      const onlineUserIds = new Set(data.onlineUserIds);
 
-        const selectedUserId = select?.id;
+      const selectedUserId = select?.id;
 
-        users = users.map((u) => ({
-          ...u,
-          isOnline: onlineUserIds.has(u.id),
+      users = users.map((u) => ({
+        ...u,
+        isOnline: onlineUserIds.has(u.id),
+      }));
+
+      if (selectedUserId) {
+        const updatedSelect = users.find((u) => u.id === selectedUserId);
+        if (updatedSelect) select = updatedSelect;
+      }
+    } catch (e) {
+      console.error("Error fetching online users:", e);
+    }
+  }
+
+  // Polling function for new messages
+  let messagePollingErrors = 0;
+  async function pollNewMessages() {
+    if (!select || isLoadingMessages || isSendingMessage) return;
+    
+    // Skip polling for 2 seconds after sending
+    if (Date.now() - lastSendTime < 2000) {
+      return;
+    }
+    
+    try {
+      const formData = new FormData();
+      formData.append("user_id", select.id);
+      formData.append("_t", Date.now().toString()); 
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000); 
+      
+      const response = await fetch("/chat/loadMessages", {
+        method: "POST",
+        body: formData,
+        cache: "no-store",
+        credentials: "include",
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const result = await response.json();
+      messagePollingErrors = 0; 
+
+      if (result.messages && select) {
+        const serverMessages: Mess[] = result.messages.map((msg: ServerMessage) => ({
+          ...msg,
+          message_type: msg.message_type || "text",
+          fromSelf: msg.sender_id === data.user.id,
+          created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
         }));
 
-        if (selectedUserId) {
-          const updatedSelect = users.find((u) => u.id === selectedUserId);
-          if (updatedSelect) select = updatedSelect;
-        }
-      } catch (e) {
-        console.error("Error fetching online users:", e);
-      }
-    }, 5000);
-
-    return () => clearInterval(intervalId);
-  });
-
-
-  $effect(() => {
-    if (!select) return;
-    
-    let consecutiveErrors = 0;
-    const maxErrors = 5;
-    
-    const checkForNewMessages = async () => {
-      if (!select || isLoadingMessages || isSendingMessage) return;
-      
-      // Skip polling for 2 seconds after sending
-      if (Date.now() - lastSendTime < 2000) {
-        return;
-      }
-      
-      try {
-        const formData = new FormData();
-        formData.append("user_id", select.id);
-        formData.append("_t", Date.now().toString()); 
+        let hasNewMessages = false;
         
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); 
-        
-        const response = await fetch("/chat/loadMessages", {
-          method: "POST",
-          body: formData,
-          cache: "no-store",
-          credentials: "include",
-          headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-          },
-          signal: controller.signal
-        });
-        
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        
-        const result = await response.json();
-        consecutiveErrors = 0; 
-
-        if (result.messages && select) {
-          const serverMessages: Mess[] = result.messages.map((msg: ServerMessage) => ({
-            ...msg,
-            message_type: msg.message_type || "text",
-            fromSelf: msg.sender_id === data.user.id,
-            created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
-          }));
-
-          let hasNewMessages = false;
-          
-          serverMessages.forEach((msg: Mess) => {
-            if (msg.id > 0 && select) {
-              const isRelevant = 
-                (msg.sender_id === myId && msg.receiver_id === select.id) ||
-                (msg.sender_id === select.id && msg.receiver_id === myId);
+        serverMessages.forEach((msg: Mess) => {
+          if (msg.id > 0 && select) {
+            const isRelevant = 
+              (msg.sender_id === myId && msg.receiver_id === select.id) ||
+              (msg.sender_id === select.id && msg.receiver_id === myId);
+            
+            if (isRelevant && !messagesMap.has(msg.id)) {
+              messagesMap.set(msg.id, msg);
+              globalMessagesMap.set(msg.id, msg);
+              processedMessageIds.add(msg.id);
+              hasNewMessages = true;
               
-              if (isRelevant && !messagesMap.has(msg.id)) {
-                messagesMap.set(msg.id, msg);
-                globalMessagesMap.set(msg.id, msg);
-                processedMessageIds.add(msg.id);
-                hasNewMessages = true;
-                
-                if (msg.id > lastPolledMessageId) {
-                  lastPolledMessageId = msg.id;
-                }
+              if (msg.id > lastPolledMessageId) {
+                lastPolledMessageId = msg.id;
               }
             }
-          });
-
-          if (hasNewMessages) {
-            messagesMap = new Map(messagesMap);
-            globalMessagesMap = new Map(globalMessagesMap);
-            messageUpdateTrigger++;
-          }
-        }
-      } catch (error) {
-        consecutiveErrors++;
-        console.error(`[POLLING ERROR ${consecutiveErrors}/${maxErrors}]:`, error);
-        
-      
-        if (consecutiveErrors >= maxErrors) {
-          console.warn("[POLLING] Too many errors, will retry in 10 seconds");
-          setTimeout(() => {
-            consecutiveErrors = 0;
-          }, 10000);
-        }
-      }
-    };
-
-
-    checkForNewMessages();
-    
- 
-    const intervalId = setInterval(checkForNewMessages, 1500);
-
-    return () => clearInterval(intervalId);
-  });
-
-  $effect(() => {
-    function onFocus() {
-      if (select?.id) {
-        loadMessages(select.id);
-      }
-    }
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  });
- 
-  $effect(() => {
-    const intervalId = setInterval(async () => {
-      if (isSendingMessage) return;
-      
-      try {
-        const res = await fetch("/chat/notifications", {
-          credentials: "include",
-          cache: "no-store",
-          headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
           }
         });
-        const data = await res.json();
-        
-        let hasNewNotifications = false;
-        
-        if (data.messagesBySender) {
-          Object.entries(data.messagesBySender as Record<string, NotificationMessage[]>).forEach(([senderId, messages]) => {
-            if (Array.isArray(messages)) {
-              messages.forEach((msg: NotificationMessage) => {
-                if (msg.id && !globalMessagesMap.has(msg.id)) {
-                  const newMsg: Mess = {
-                    id: msg.id,
-                    sender_id: senderId,
-                    receiver_id: myId,
-                    content: msg.content,
-                    message_type: msg.message_type || "text",
-                    file_path: msg.file_path,
-                    created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
-                    fromSelf: false,
-                  };
-                  globalMessagesMap.set(msg.id, newMsg);
-                  processedMessageIds.add(msg.id);
-                  hasNewNotifications = true;
-                }
-              });
-            }
-          });
-          
-          if (hasNewNotifications) {
-            globalMessagesMap = new Map(globalMessagesMap);
-            messageUpdateTrigger++;
-          }
-        }
-        
-        unseenMessages = data.unseenMessages;
-        messagesBySender = data.messagesBySender;
-        updateTotalNotificationCount();
-      } catch (e) {
-        console.error("Polling error:", e);
-      }
-    }, 2000);
 
-    return () => clearInterval(intervalId);
-  });
+        if (hasNewMessages) {
+          messagesMap = new Map(messagesMap);
+          globalMessagesMap = new Map(globalMessagesMap);
+          messageUpdateTrigger++;
+        }
+      }
+    } catch (error) {
+      messagePollingErrors++;
+      console.error(`[POLLING ERROR ${messagePollingErrors}/5]:`, error);
+      
+      if (messagePollingErrors >= 5) {
+        console.warn("[POLLING] Too many errors, will retry in 10 seconds");
+        setTimeout(() => {
+          messagePollingErrors = 0;
+        }, 10000);
+      }
+    }
+  }
+
+  // Window focus handler function
+  function handleWindowFocus() {
+    if (select?.id) {
+      loadMessages(select.id);
+    }
+  }
+
+  // Polling function for notifications
+  async function pollNotifications() {
+    if (isSendingMessage) return;
+    
+    try {
+      const res = await fetch("/chat/notifications", {
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+        }
+      });
+      const data = await res.json();
+      
+      let hasNewNotifications = false;
+      
+      if (data.messagesBySender) {
+        Object.entries(data.messagesBySender as Record<string, NotificationMessage[]>).forEach(([senderId, messages]) => {
+          if (Array.isArray(messages)) {
+            messages.forEach((msg: NotificationMessage) => {
+              if (msg.id && !globalMessagesMap.has(msg.id)) {
+                const newMsg: Mess = {
+                  id: msg.id,
+                  sender_id: senderId,
+                  receiver_id: myId,
+                  content: msg.content,
+                  message_type: msg.message_type || "text",
+                  file_path: msg.file_path,
+                  created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
+                  fromSelf: false,
+                };
+                globalMessagesMap.set(msg.id, newMsg);
+                processedMessageIds.add(msg.id);
+                hasNewNotifications = true;
+              }
+            });
+          }
+        });
+        
+        if (hasNewNotifications) {
+          globalMessagesMap = new Map(globalMessagesMap);
+          messageUpdateTrigger++;
+        }
+      }
+      
+      unseenMessages = data.unseenMessages;
+      messagesBySender = data.messagesBySender;
+      updateTotalNotificationCount();
+    } catch (e) {
+      console.error("Polling error:", e);
+    }
+  }
 
 
   let sseInitialized = false;
+  let markSeenIntervalId: ReturnType<typeof setInterval> | null = null;
+  let messagePollingIntervalId: ReturnType<typeof setInterval> | null = null;
+  
+  // Consolidated onMount - all intervals and event listeners here
   onMount(() => {
-
     console.log("[REALTIME] Using polling-only mode (SSE disabled for Vercel compatibility)");
+    
+    // Heartbeat interval
+    fetch("/chat/heartbeat", { method: "POST", credentials: "include" });
+    const heartbeatInterval = setInterval(() => {
+      fetch("/chat/heartbeat", { method: "POST", credentials: "include" });
+    }, 20000);
+
+    // Online users polling
+    const onlineUsersInterval = setInterval(pollOnlineUsers, 5000);
+    
+    // Notifications polling
+    const notificationsInterval = setInterval(pollNotifications, 2000);
+    
+    // Window focus event
+    window.addEventListener("focus", handleWindowFocus);
+    
+    // Load initial notification counts
+    if (data.users && data.users.length > 0) {
+      loadNotificationCounts();
+    }
     
     return () => {
       console.log("[REALTIME] Cleanup");
+      clearInterval(heartbeatInterval);
+      clearInterval(onlineUsersInterval);
+      clearInterval(notificationsInterval);
+      window.removeEventListener("focus", handleWindowFocus);
+      if (markSeenIntervalId) clearInterval(markSeenIntervalId);
+      if (messagePollingIntervalId) clearInterval(messagePollingIntervalId);
     };
   });
+
+  // Handle incoming notification messages
 
   function handleNotificationMessage(payload: ServerMessage) {
     if (payload.receiver_id === myId && payload.sender_id !== myId) {
@@ -391,7 +378,7 @@
         messageUpdateTrigger++;
       }
 
-      if (!isActivelyChatting) {
+      if (!isActivelyChatting) {// Not actively chatting with this user
         console.log(
           "Adding real-time notification for user:",
           payload.sender_id,
@@ -426,6 +413,8 @@
     }
   }
   let hasInitialized = false;
+
+  // Initial processing of loaded messages
 
   $effect(() => {
     if (data.messages && !hasInitialized) {
@@ -465,6 +454,8 @@
     }
   });
 
+  // Select a user to chat with
+
   async function sel(selectedUser: User) {
     if (select && select.id === selectedUser.id) return;
     select = selectedUser;
@@ -497,6 +488,8 @@
   }
 
   let isLoadingMessages = false;
+
+  // Load messages for a specific user
 
   async function loadMessages(userId: string) {
     if (isLoadingMessages) return;
@@ -558,6 +551,8 @@
     }
   }
 
+// Send a text message to the selected user
+
   async function message() {
     if (!input.trim() || !select) return;
     const messageContent = input;
@@ -606,6 +601,8 @@
     }
   }
 
+  // Update notification count for a user
+
   function updateNotificationCount(userId: string, increment: number) {
     console.log(
       `Updating notification count for user ${userId} by ${increment}`,
@@ -641,6 +638,8 @@
     notificationCount = total;
   }
 
+  // Load notification counts from the server
+
   async function loadNotificationCounts() {
     try {
       console.log("Loading notification counts...");
@@ -664,6 +663,8 @@
     }
   }
 
+  // Mark messages as seen for a specific sender
+
   async function markMessagesAsSeen(senderId: string) {
     try {
       const formData = new FormData();
@@ -683,6 +684,8 @@
       console.error("Error marking messages as seen:", error);
     }
   }
+
+  // Immediately mark a specific message as seen
 
   async function markMessageAsSeenImmediately(msgId: number, senderId: string) {
     if (!select) return;
@@ -714,6 +717,8 @@
     }
   }
 
+  // Mark a specific message as seen
+
   async function markMessageAsSeen(messageId: number, senderId: string) {
     try {
       const response = await fetch("/chat/notifications", {
@@ -743,6 +748,8 @@
       console.error("Error marking message as seen:", error);
     }
   }
+
+  // Upload an image and send as a message
 
   async function uploadImage() {
     if (!selectedFile || !select) {
@@ -800,6 +807,8 @@
     }
   }
 
+  // Handle file selection for upload
+
   function handleFileSelect(event: Event) {
     console.log("File selection triggered");
     const target = event.target as HTMLInputElement;
@@ -819,29 +828,55 @@
     }
   }
 
+  // Effect to manage message polling based on selected user
   $effect(() => {
-    if (data.users && data.users.length > 0) {
-      loadNotificationCounts();
+    // Clear existing interval
+    if (messagePollingIntervalId) {
+      clearInterval(messagePollingIntervalId);
+      messagePollingIntervalId = null;
     }
+    if (markSeenIntervalId) {
+      clearInterval(markSeenIntervalId);
+      markSeenIntervalId = null;
+    }
+    
+    // Start polling if user is selected
+    if (select) {
+      pollNewMessages(); // Initial call
+      messagePollingIntervalId = setInterval(pollNewMessages, 1500);
+      
+      // Start mark as seen interval
+      if (currentSelectedId) {
+        markSeenIntervalId = startMarkingMessagesAsSeen(currentSelectedId);
+      }
+    }
+    
+    return () => {
+      if (messagePollingIntervalId) clearInterval(messagePollingIntervalId);
+      if (markSeenIntervalId) clearInterval(markSeenIntervalId);
+    };
   });
 
+  // Derived notification count - updates automatically
   $effect(() => {
     updateTotalNotificationCount();
   });
 
-  $effect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      const target = event.target as HTMLElement;
-      if (
-        showNotifications &&
-        !target.closest("[data-notification-dropdown]") &&
-        !target.closest("[data-notification-button]")
-      ) {
-        showNotifications = false;
-      }
+  // Click outside handler function
+  function handleClickOutside(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    if (
+      showNotifications &&
+      !target.closest("[data-notification-dropdown]") &&
+      !target.closest("[data-notification-button]")
+    ) {
+      showNotifications = false;
     }
+  }
 
-    if (typeof window !== "undefined") {
+  // Effect for click outside - only when dropdown is shown
+  $effect(() => {
+    if (showNotifications && typeof window !== "undefined") {
       document.addEventListener("click", handleClickOutside);
       return () => document.removeEventListener("click", handleClickOutside);
     }

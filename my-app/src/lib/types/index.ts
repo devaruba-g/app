@@ -1,6 +1,6 @@
 import type { RowDataPacket } from 'mysql2/promise';
 
-// Database Row Types
+// User Row
 
 export interface UserRow extends RowDataPacket {
   id: string;
@@ -10,6 +10,8 @@ export interface UserRow extends RowDataPacket {
   last_active_at?: string;
   isOnline?: number;
 }
+
+// Chat Message Row
 
 export interface ChatMessageRow extends RowDataPacket {
   id: number;
@@ -21,6 +23,8 @@ export interface ChatMessageRow extends RowDataPacket {
   created_at: string;
   seen?: number;
 }
+
+// Notification Row
 
 export interface NotificationRow extends RowDataPacket {
   sender_id: string;
@@ -36,7 +40,7 @@ export interface MaxIdRow extends RowDataPacket {
   maxId: number;
 }
 
-// Application Types
+// User Types
 
 export interface User {
   id: string;
@@ -44,6 +48,8 @@ export interface User {
   avatar: string;
   isOnline?: boolean;
 }
+
+// Chat Message Types
 
 export interface Mess {
   id: number;
@@ -57,6 +63,8 @@ export interface Mess {
   clientTimestamp?: number;
 }
 
+// Notification Message Types
+
 export interface NotificationMessage {
   id: number;
   content: string;
@@ -65,6 +73,8 @@ export interface NotificationMessage {
   file_path?: string;
   sender_name?: string;
 }
+
+// Server Message Types
 
 export interface ServerMessage {
   id: number;
@@ -83,3 +93,13 @@ export interface AuthUser {
   name: string;
   email: string;
 }
+
+
+
+export interface FormResult {
+        success?: boolean;
+        invalid?: boolean;
+        message?: string;
+    }
+
+
