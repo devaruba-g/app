@@ -9,7 +9,7 @@ type ChatEvent = {
     file_path?: string;
     created_at?: string;
   };
-  excludeUserId?: string; // Don't send to this user (the sender)
+  excludeUserId?: string; 
 };
 
 type Listener = {
@@ -26,10 +26,9 @@ export function subscribe(userId: string, callback: (event: ChatEvent) => void) 
 }
 
 export function publish(event: ChatEvent) {
-  // Don't send to the sender (they already have optimistic update)
   for (const listener of listeners) {
     if (event.excludeUserId && listener.userId === event.excludeUserId) {
-      continue; // Skip sending to sender
+      continue; 
     }
     listener.callback(event);
   }

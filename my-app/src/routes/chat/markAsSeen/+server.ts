@@ -1,6 +1,5 @@
-
 import type { RequestHandler } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { markMessagesAsSeen } from '$lib/db/queries';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
@@ -15,10 +14,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       );
     }
 
-    await db.execute(
-      'UPDATE chat SET seen = 1 WHERE sender_id = ? AND receiver_id = ?',
-      [sender_id, receiver_id]
-    );
+    await markMessagesAsSeen(sender_id, receiver_id);
 
     return new Response(JSON.stringify({ success: true }));
   } catch (error) {

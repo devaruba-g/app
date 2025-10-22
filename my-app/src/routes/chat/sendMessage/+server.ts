@@ -1,7 +1,6 @@
-import { db } from '$lib/db';
 import { publish } from '$lib/realtime';
 import type { RequestHandler } from '@sveltejs/kit';
-import type { RowDataPacket, ResultSetHeader } from 'mysql2/promise';
+import { insertTextMessage, getMessageById } from '$lib/db/queries';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
@@ -24,20 +23,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       );
     }
 
-    const [result] = await db.execute(
-  'INSERT INTO chat (sender_id, receiver_id, content, message_type, seen) VALUES (?, ?, ?, ?, 0)',
-  [sender_id, receiver_id, content, 'text']
-);
+    const insertedId = await insertTextMessage(sender_id, receiver_id, content);
 
-
-    const insertedId = (result as any).insertId;
-
-    const [rows] = await db.execute<RowDataPacket[]>(
-      'SELECT * FROM chat WHERE id = ?',
-      [insertedId]
-    );
-
-    const message = rows[0];
+    const message = await getMessageById(insertedId);
 
 
     publish({

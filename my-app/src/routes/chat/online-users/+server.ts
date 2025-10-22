@@ -1,13 +1,8 @@
 import type { RequestHandler } from '@sveltejs/kit';
-import type { RowDataPacket } from 'mysql2/promise';
-import { db } from '$lib/db';
+import { getOnlineUsers } from '$lib/db/queries';
 
 export const GET: RequestHandler = async () => {
-  const [rows] = await db.query<RowDataPacket[]>(
-    'SELECT id FROM auth_user WHERE last_active_at > NOW() - INTERVAL 1 MINUTE'
-  );
-
-  const onlineUserIds = rows.map(r => r.id);
+  const onlineUserIds = await getOnlineUsers();
 
   return new Response(JSON.stringify({ onlineUserIds }), {
     headers: { 

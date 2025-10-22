@@ -5,9 +5,8 @@
     AvatarFallback,
   } from "$lib/components/ui/avatar";
   import { Button } from "$lib/components/ui/button";
-  import { Card, CardTitle, CardContent } from "$lib/components/ui/card";
+  import { Card, CardContent } from "$lib/components/ui/card";
   import { Badge } from "$lib/components/ui/badge";
-  import { enhance } from "$app/forms";
   import { goto } from "$app/navigation";
   import {
     Tabs,
@@ -16,25 +15,10 @@
     TabsContent,
   } from "$lib/components/ui/tabs";
   import type { PageData } from "./$types";
+  import type { User, Mess, NotificationMessage, ServerMessage } from "$lib/types";
+  
   let { data }: { data: PageData } = $props();
   const myId = data.user.id;
-  interface User {
-    id: string;
-    name: string;
-    avatar: string;
-    isOnline?: boolean;
-  }
-  interface Mess {
-    id: number;
-    sender_id: string;
-    receiver_id: string;
-    content: string;
-    message_type: "text" | "image";
-    file_path?: string;
-    created_at: Date;
-    fromSelf: boolean;
-    clientTimestamp?: number; 
-  }
   let users = $state<User[]>(data.users || []);
   let select = $state<User | null>(null);
   let messagesMap = $state<Map<number, Mess>>(new Map()); 
@@ -44,7 +28,7 @@
   let notificationCount = $state(0);
   let showNotifications = $state(false);
   let unseenMessages = $state<{ [userId: string]: number }>({});
-  let messagesBySender = $state<{ [userId: string]: any[] }>({});
+  let messagesBySender = $state<{ [userId: string]: NotificationMessage[] }>({});
   let isUploading = $state(false);
   let selectedFile = $state<File | null>(null);
   let activeTab = $state<"chats" | "all-users">("chats");
@@ -54,7 +38,6 @@
   let showImageModal = $state(false);
   let modalImageSrc = $state<string | null>(null);
   let processedMessageIds = $state<Set<number>>(new Set());
-  let recentlyProcessedSSE = $state<Map<number, number>>(new Map());
   let lastPolledMessageId = $state<number>(0);
   let isSendingMessage = $state(false);
   let lastSendTime = $state(0); 
@@ -254,7 +237,7 @@
         consecutiveErrors = 0; 
 
         if (result.messages && select) {
-          const serverMessages: Mess[] = result.messages.map((msg: any) => ({
+          const serverMessages: Mess[] = result.messages.map((msg: ServerMessage) => ({
             ...msg,
             message_type: msg.message_type || "text",
             fromSelf: msg.sender_id === data.user.id,
@@ -338,9 +321,9 @@
         let hasNewNotifications = false;
         
         if (data.messagesBySender) {
-          Object.entries(data.messagesBySender).forEach(([senderId, messages]: [string, any]) => {
+          Object.entries(data.messagesBySender as Record<string, NotificationMessage[]>).forEach(([senderId, messages]) => {
             if (Array.isArray(messages)) {
-              messages.forEach((msg: any) => {
+              messages.forEach((msg: NotificationMessage) => {
                 if (msg.id && !globalMessagesMap.has(msg.id)) {
                   const newMsg: Mess = {
                     id: msg.id,
@@ -388,7 +371,7 @@
     };
   });
 
-  function handleNotificationMessage(payload: any) {
+  function handleNotificationMessage(payload: ServerMessage) {
     if (payload.receiver_id === myId && payload.sender_id !== myId) {
       const isActivelyChatting = select && select.id === payload.sender_id;
 
@@ -447,8 +430,9 @@
   $effect(() => {
     if (data.messages && !hasInitialized) {
       hasInitialized = true;
-      const formatted = data.messages.map((msg: any) => ({
+      const formatted = data.messages.map((msg: ServerMessage): Mess => ({
         ...msg,
+        message_type: msg.message_type || "text",
         fromSelf: msg.sender_id === data.user.id,
         created_at: msg.created_at ? new Date(msg.created_at) : new Date(),
       }));
@@ -462,14 +446,14 @@
 
       if (data.selectedUserId) {
         const selectedMessages = formatted.filter(
-          (msg) =>
+          (msg): msg is Mess =>
             (msg.sender_id === myId && msg.receiver_id === data.selectedUserId) ||
             (msg.sender_id === data.selectedUserId && msg.receiver_id === myId)
         );
         
 
         messagesMap.clear();
-        selectedMessages.forEach((msg: Mess) => {
+        selectedMessages.forEach((msg) => {
           messagesMap.set(msg.id, msg);
         });
         messagesMap = new Map(messagesMap);
@@ -532,7 +516,7 @@
       const result = await response.json();
 
       if (result.messages && currentSelectedId === userId) {
-        const serverMessages: Mess[] = result.messages.map((msg: any) => ({
+        const serverMessages: Mess[] = result.messages.map((msg: ServerMessage) => ({
           ...msg,
           message_type: msg.message_type || "text",
           fromSelf: msg.sender_id === data.user.id,
@@ -730,7 +714,7 @@
     }
   }
 
-  async function markMessageAsSeen(messageId: string, senderId: string) {
+  async function markMessageAsSeen(messageId: number, senderId: string) {
     try {
       const response = await fetch("/chat/notifications", {
         method: "POST",
@@ -744,7 +728,7 @@
       if (response.ok) {
         if (messagesBySender[senderId]) {
           messagesBySender[senderId] = messagesBySender[senderId].filter(
-            (msg) => msg.id != messageId,
+            (msg) => msg.id !== messageId,
           );
           if (messagesBySender[senderId].length === 0) {
             delete messagesBySender[senderId];

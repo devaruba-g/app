@@ -1,5 +1,5 @@
 import type { RequestHandler } from '@sveltejs/kit';
-import { db } from '$lib/db';
+import { updateUserLastActive } from '$lib/db/queries';
 
 export const POST: RequestHandler = async ({ locals }) => {
   if (!locals.user) {
@@ -9,7 +9,7 @@ export const POST: RequestHandler = async ({ locals }) => {
   const userId = locals.user.id;
 
   try {
-    await db.query('UPDATE auth_user SET last_active_at= NOW() WHERE id = ?', [userId]);
+    await updateUserLastActive(userId);
     return new Response('ok');
   } catch (err) {
     console.error('Error updating last_active_at:', err);

@@ -1,6 +1,5 @@
-import { db } from '$lib/db';
 import type { RequestHandler } from '@sveltejs/kit';
-import type { RowDataPacket } from 'mysql2/promise';
+import { getMessagesBetweenUsers } from '$lib/db/queries';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
@@ -12,20 +11,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       return new Response(JSON.stringify({ messages: [] }), { status: 400 });
     }
 
-    const [rows] = await db.execute<RowDataPacket[]>(
-      'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY id ASC',
-      [myId, otherUserId, otherUserId, myId]
-    );
-
-    const messages = rows.map((r) => ({
-      id: r.id,
-      sender_id: r.sender_id,
-      receiver_id: r.receiver_id,
-      content: r.content,
-      message_type: r.message_type,
-      file_path: r.file_path || null,
-      created_at: r.created_at,
-    }));
+    const messages = await getMessagesBetweenUsers(myId, otherUserId);
 
     return new Response(JSON.stringify({ messages }), {
       headers: { 

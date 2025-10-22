@@ -1,45 +1,22 @@
 import type { PageServerLoad, Actions } from './$types';
-import { db } from '$lib/db';
-import { publish } from '$lib/realtime';
 import { redirect } from '@sveltejs/kit';
-import type { RowDataPacket, ResultSetHeader } from 'mysql2/promise';
-interface users extends RowDataPacket {
-  id: string;
-  name: string;
-}
-interface ChatMessage extends RowDataPacket {
-  id: number;
-  sender_id: string;
-  receiver_id: string;
-  content: string;
-  created_at: Date;
-}
+import { getAllUsersExcept, getAllMessagesForUser, getMessagesBetweenUsers, type ChatMessageRow } from '$lib/db/queries';
 export let load: PageServerLoad = async ({ locals, url }) => {
   if (!locals.user)
     throw redirect(302, '/');
-  let [rows] = await db.execute<users[]>(`
-  SELECT id, name, last_active_at,
-         CASE WHEN last_active_at> NOW() - INTERVAL 3 SECOND THEN 1 ELSE 0 END AS isOnline
-  FROM auth_user
-  WHERE id != ?
-`, [locals.user.id]);
+  
+  const rows = await getAllUsersExcept(locals.user.id);
 
   let users = rows.map(u => ({
     ...u,
-    avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(u.name)}&background=0073B1&color=ffffff&size=128`
-
-    ,
+    avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(u.name)}&background=0073B1&color=ffffff&size=128`,
     isOnline: !!u.isOnline,
   }));
 
   const selectedUserId = url.searchParams.get('user');
-  let messages: ChatMessage[] = [];
+  let messages: ChatMessageRow[] = [];
   try {
-    let [messageRows] = await db.execute<ChatMessage[]>(
-      'SELECT * FROM chat WHERE sender_id=? OR receiver_id=? ORDER BY id ASC',
-      [locals.user.id, locals.user.id]
-    );
-    messages = messageRows;
+    messages = await getAllMessagesForUser(locals.user.id);
   } catch (error) {
     console.error('Error loading messages:', error);
   }
@@ -55,11 +32,8 @@ export let actions: Actions = {
       let otherUserId = form.get('user_id') as string;
       let me = locals.user?.id;
       if (!me || !otherUserId) return { messages: [] };
-      let [rows] = await db.execute<ChatMessage[]>(
-        'SELECT * FROM chat WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY id ASC',
-        [me, otherUserId, otherUserId, me]
-      );
-      return { messages: rows };
+      const messages = await getMessagesBetweenUsers(me, otherUserId);
+      return { messages };
     } catch {
       return { messages: [] };
     }

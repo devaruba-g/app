@@ -1,6 +1,6 @@
 import type { RequestHandler } from '@sveltejs/kit';
-import { db } from '$lib/db';
 import { publish } from '$lib/realtime';
+import { insertImageMessage, getMessageById } from '$lib/db/queries';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
   if (!locals.user) {
@@ -23,7 +23,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       });
     }
 
-
+// Validate file type and size (e.g., max 5MB, only images)
     if (!file.type.startsWith('image/')) {
       return new Response(JSON.stringify({ error: 'File must be an image' }), {
         status: 400,
@@ -45,19 +45,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     const base64DataUrl = `data:${file.type};base64,${base64String}`;
 
   
-    const [result] = await db.execute(
-      'INSERT INTO chat (sender_id, receiver_id, content, message_type, file_path, seen) VALUES (?, ?, ?, ?, ?, 0)',
-      [sender_id, receiver_id, file.name, 'image', base64DataUrl]
-    );
+    const insertedId = await insertImageMessage(sender_id, receiver_id, file.name, base64DataUrl);
 
-    const insertedId = (result as any).insertId;
-
-
-    const [rows] = await db.execute<any[]>(
-      'SELECT * FROM chat WHERE id = ?',
-      [insertedId]
-    );
-    const message = rows[0];
+    const message = await getMessageById(insertedId);
 
     
     publish({

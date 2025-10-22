@@ -13,12 +13,13 @@
   import { goto } from "$app/navigation";
   import { browser } from "$app/environment";
   import { writable } from "svelte/store";
+  import type { AuthUser } from "$lib/types";
 
   let {
     data,
     form,
   }: {
-    data: { user: any };
+    data: { user: AuthUser | null };
     form: { type?: string; message?: string; redirect?: string };
   } = $props();
   const loadingSignIn = writable(false);
