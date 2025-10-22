@@ -1020,8 +1020,8 @@
       </div>
     {/if}
 
-    <div class="flex-1 flex flex-col bg-[#0073B1]">
-      <Tabs bind:value={activeTab} class="flex-1 flex flex-col">
+    <div class="flex-1 flex flex-col bg-[#0073B1] overflow-hidden">
+      <Tabs bind:value={activeTab} class="flex-1 flex flex-col overflow-hidden">
         <div class="px-4 flex justify-center py-1 bg-gray-100">
           <TabsList class="grid w-full grid-cols-2 bg-white rounded-full">
             <TabsTrigger
@@ -1091,7 +1091,7 @@
           {/each}
         </TabsContent>
 
-        <TabsContent value="all-users" class="flex-1 overflow-y-auto px-4 py-2">
+        <TabsContent value="all-users" class="flex-1 overflow-y-auto px-4 py-2 custom-scrollbar">
           {#if allUsers.length === 0}
             <div class="p-4 text-gray-400 font-bold">No users yet</div>
           {/if}
@@ -1268,5 +1268,9 @@
 <style>
   .custom-scrollbar {
     scrollbar-color: grey transparent;
+  }
+  .overflow-hidden{
+    scrollbar-color: grey transparent;
+    scrollbar-width: thin;
   }
 </style>
